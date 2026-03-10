@@ -7,14 +7,14 @@
 
 airflow:
   connections:
-    - conn_id:
-      conn_type:
-      conn_host:
-      conn_schema:
-      conn_login:
-      conn_password:
-      conn_port:
-      conn_extra:
+    - conn_id:s3_bi
+      conn_type:aws
+      conn_host:https://172.17.0.2:9000
+      conn_schema:bi-dev
+      conn_login:minioadmin
+      conn_password:minioadmin
+      conn_port:null
+      conn_extra:null
         example_extra_field: example-value
   pools:
     - pool_name:
