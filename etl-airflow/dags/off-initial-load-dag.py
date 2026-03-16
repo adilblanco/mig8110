@@ -33,11 +33,27 @@ duckdb_env_vars = {
     "DUCKDB_DB": "{{ conn.duckdb_default.schema }}",
 }
 
-SCHEMA_NAME = "main"
+SCHEMA_NAME = "off"
 RAW_TABLE_NAME = "canada_products"
 NUTRITIONS_TABLE_NAME = "nutritions"
 PRODUCT_COVERS_TABLE_NAME = "product_covers"
-PRODUCTS_TABLE_NAME = "products_clean"
+PRODUCTS_TABLE_NAME = "products"
+
+INGREDIENTS_TO_FILTER = [
+    "added sugar",
+    "disaccharide",
+    "monosaccharide",
+    "polysaccharide",
+    "carbohydrate",
+    "dairy",
+    "milk product",
+    "milk products",
+    "compound",
+    "compound ingredient",
+    "preparation",
+]
+
+FILTER_LIST_SQL = ", ".join([f"'{item}'" for item in INGREDIENTS_TO_FILTER])
 
 with dag:
 
@@ -56,12 +72,9 @@ with dag:
         image="mig8110/etl-images:1.0.0",
         env_vars={**s3_env_vars},
         arguments=[
-            "--command",
-            "extract_data",
-            "--output_file_key",
-            "data.parquet",
-            "--url",
-            "https://raw.githubusercontent.com/adilblanco/mig8110/main/data/canada_products.parquet.zip",
+            "--command", "extract_data",
+            "--output_file_key", "data.parquet",
+            "--url", "https://raw.githubusercontent.com/adilblanco/mig8110/main/data/canada_products.parquet.zip",
         ],
     )
 
@@ -71,13 +84,23 @@ with dag:
         image="mig8110/etl-images:1.0.0",
         env_vars={**s3_env_vars, **duckdb_env_vars},
         arguments=[
-            "--command",
-            "load_data",
-            "--input_file_key",
-            "data.parquet",
-            "--table_name",
-            RAW_TABLE_NAME,
+            "--command", "load_data",
+            "--input_file_key", "data.parquet",
+            "--table_name", RAW_TABLE_NAME,
         ],
+    )
+
+    move_raw_table_to_off = DuckDBOperator(
+        dag=dag,
+        task_id="move-raw-table-to-off",
+        sql=f"""
+        CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME};
+
+        CREATE OR REPLACE TABLE {SCHEMA_NAME}.{RAW_TABLE_NAME} AS
+        SELECT *
+        FROM main.{RAW_TABLE_NAME};
+        """,
+        duckdb_conn_id="duckdb_default",
     )
 
     create_nutritions_table = DuckDBOperator(
@@ -126,28 +149,70 @@ with dag:
         task_id="create-products-table",
         sql=f"""
         CREATE OR REPLACE TABLE {SCHEMA_NAME}.{PRODUCTS_TABLE_NAME} AS
+        WITH source_data AS (
+            SELECT
+                code,
+                product_name,
+                brands,
+                categories,
+                categories_tags,
+                nutriscore_score,
+                nutriscore_grade,
+
+                CASE
+                    WHEN ingredients_original_tags IS NOT NULL
+                         AND array_length(ingredients_original_tags) > 0
+                    THEN ingredients_original_tags
+                    WHEN ingredients_tags IS NOT NULL
+                         AND array_length(ingredients_tags) > 0
+                    THEN ingredients_tags
+                    ELSE []
+                END AS raw_tags
+
+            FROM {SCHEMA_NAME}.{RAW_TABLE_NAME}
+        ),
+        normalized_data AS (
+            SELECT
+                code,
+                product_name,
+                brands,
+                categories,
+                categories_tags,
+                nutriscore_score,
+                nutriscore_grade,
+
+                list_filter(
+                    list_transform(
+                        raw_tags,
+                        x -> replace(
+                            regexp_replace(lower(x), '^[a-z]+:', ''),
+                            '-',
+                            ' '
+                        )
+                    ),
+                    x -> x NOT IN ({FILTER_LIST_SQL})
+                ) AS normalized_ingredients
+
+            FROM source_data
+        )
         SELECT
-            TRIM(CAST(code AS VARCHAR)) AS code,
-            TRIM(product_name[1].text) AS product_name,
-            LOWER(TRIM(nutriscore_grade)) AS nutriscore_grade,
-            TRIM(
-                string_split(categories, ',')[
-                    array_length(string_split(categories, ','))
-                ]
-            ) AS category
-        FROM {SCHEMA_NAME}.{RAW_TABLE_NAME}
-        WHERE code IS NOT NULL
-          AND array_length(product_name) > 0
-          AND product_name[1].text IS NOT NULL
-          AND nutriscore_grade IS NOT NULL
-          AND categories IS NOT NULL
+            code,
+            product_name[1].text AS product_name,
+            brands,
+            categories,
+            categories_tags,
+            nutriscore_score,
+            nutriscore_grade,
+            array_to_string(normalized_ingredients, ', ') AS ingredients_text_normalized,
+            array_length(normalized_ingredients) AS ingredients_count
+        FROM normalized_data
         """,
         duckdb_conn_id="duckdb_default",
     )
 
     end = EmptyOperator(task_id="end")
 
-    start >> create_schema >> extract_data >> load_data >> [
+    start >> create_schema >> extract_data >> load_data >> move_raw_table_to_off >> [
         create_nutritions_table,
         create_product_covers_table,
         create_products_table,
