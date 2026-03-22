@@ -5,18 +5,35 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DUCKDB_TOKEN = os.getenv("DUCKDB_TOKEN")
-DUCKDB_DB = os.getenv("DUCKDB_DB")
+DUCKDB_DB = os.getenv("DUCKDB_DB","my_db")
 TABLE_NAME = "raw.products"
 
 if not DUCKDB_TOKEN or not DUCKDB_DB:
     raise RuntimeError("DUCKDB_TOKEN et/ou DUCKDB_DB manquants dans .env")
 
-conn_str = f"md:{DUCKDB_DB}?motherduck_token={DUCKDB_TOKEN}"
-db = duckdb.connect(conn_str, read_only=True)
 
-def execute_query(sql: str, params: List[Any] = None) -> List[Dict]:
-    """Exécute une requête et retourne les résultats en dicts"""
-    result = db.execute(sql, params or [])
-    cols = [c[0] for c in result.description]
-    rows = result.fetchall()
-    return [dict(zip(cols, row)) for row in rows]
+DATABASE_PATH = f"md:{DUCKDB_DB}?motherduck_token={DUCKDB_TOKEN}"
+#conn_str = f"md:{DUCKDB_DB}?motherduck_token={DUCKDB_TOKEN}"
+#db = duckdb.connect(conn_str, read_only=True)
+
+# Nutriments standards (Suffixe _NUTRIMENT pour la clarté)
+ENERGY_NUTRIMENT = "energy_100g"
+FAT_NUTRIMENT = "fat_100g"
+SATURATED_FAT_NUTRIMENT = "saturated_fat_100g"
+CARBS_NUTRIMENT = "carbohydrates_100g"
+SUGARS_NUTRIMENT = "sugars_100g"
+PROTEINS_NUTRIMENT = "proteins_100g"
+SALT_NUTRIMENT = "salt_100g"
+FIBER_NUTRIMENT = "fiber_100g"
+
+# Liste groupée pour les requêtes SELECT automatiques
+ALL_NUTRIENTS_COLUMNS = [
+    ENERGY_NUTRIMENT,
+    FAT_NUTRIMENT,
+    SATURATED_FAT_NUTRIMENT,
+    CARBS_NUTRIMENT,
+    SUGARS_NUTRIMENT,
+    PROTEINS_NUTRIMENT,
+    SALT_NUTRIMENT,
+    FIBER_NUTRIMENT
+]
