@@ -1,32 +1,16 @@
-import React from "react";
+// Affiche le résultat de recherche
 
-export default function ProductList({ products, selectedId, onSelect }) {
+export default function ProductList({ product, onViewDetails }) {
   return (
-    <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-      {products.map((p) => (
-        <li
-          key={p.id}
-          style={{
-            padding: 12,
-            border: "1px solid #ddd",
-            borderRadius: 8,
-            marginBottom: 8,
-            cursor: "pointer",
-            background: selectedId === p.id ? "#f0f7ff" : "#fff",
-          }}
-          onClick={() => onSelect(p)}
-        >
-          <div style={{ fontWeight: 600 }}>{p.name}</div>
-          <div style={{ color: "#666", fontSize: 14 }}>
-            {p.brand || "Sans marque"} · {p.category || "Catégorie inconnue"}
-          </div>
-          {p.serving_size && (
-            <div style={{ color: "#666", fontSize: 12 }}>
-              Portion: {p.serving_size}
-            </div>
-          )}
-        </li>
-      ))}
-    </ul>
+    <div style={{ marginTop: "20px" }}>
+      <h2>Résultat</h2>
+
+      <p><strong>Nom :</strong> {product.name}</p>
+      <p><strong>Marque :</strong> {product.brand}</p>
+
+      <button onClick={onViewDetails}>
+        Voir détail produit
+      </button>
+    </div>
   );
 }

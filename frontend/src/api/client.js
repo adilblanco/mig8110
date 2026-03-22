@@ -1,10 +1,14 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
+import axios from "axios";
 
-export async function fetchJSON(path) {
-  const res = await fetch(`${API_BASE}${path}`);
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(txt || `HTTP ${res.status}`);
-  }
-  return res.json();
-}
+// URL backend depuis .env
+const API = axios.create({
+  baseURL: import.meta.env.VITE_API_URL,
+});
+
+// 🔍 Recherche produit par code
+export const fetchProductByCode = (code) =>
+  API.get(`/products/${code}`);
+
+// 📊 Détails produit (nutriments + ingrédients)
+export const fetchProductDetails = (code) =>
+  API.get(`/products/${code}/details`);
