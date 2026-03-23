@@ -1,3 +1,4 @@
+# app/api/product_routes.py
 from fastapi import APIRouter, HTTPException
 
 from app.services.product_service import ProductService
@@ -6,7 +7,7 @@ from app.services.product_service import ProductService
 router = APIRouter(prefix="/products", tags=["Products"])
 
 # 🔍 Recherche produit par code
-@router.get("/products/{code}")
+@router.get("/{code}")
 async def get_product(code: str):
     product = ProductService.get_product_by_code(code)
     if not product:
