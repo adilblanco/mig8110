@@ -1,6 +1,8 @@
+# app/routers/products
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
-from models import get_products_list, get_product_by_code
+from app.dao.product_dao import ProductDAO
+
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -9,11 +11,20 @@ def list_products(
     q: Optional[str] = Query(None, description="Recherche par nom de produit"),
     brand: Optional[str] = Query(None, description="Filtre par marque"),
 ):
-    return get_products_list(q, brand)
+    # On initialise le DAO (ou on utilise la méthode static si définie)
+    dao = ProductDAO()
+    products = dao.search_by_name_product(name_product=q) if q else []
+    
+    if products is None:
+        return []
+    return products
 
 @router.get("/{code}")
 def get_product(code: str):
-    product = get_product_by_code(code)
+    # Appel de la méthode statique de ton DAO
+    product = ProductDAO.get_by_code_product(code)
+    
     if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
+        raise HTTPException(status_code=404, detail="Produit non trouvé dans la base Canada")
     return product
+

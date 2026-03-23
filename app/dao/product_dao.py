@@ -1,3 +1,4 @@
+# app/dao/product_dao.py
 from typing import Optional
 from app.db import get_connection
 

@@ -1,4 +1,5 @@
-from config import db, TABLE_NAME
+# app/models.py
+from app.config import db, TABLE_NAME
 from typing import List, Dict, Any, Optional
 
 def execute_query(sql: str, params: List[Any] = None) -> List[Dict]:
