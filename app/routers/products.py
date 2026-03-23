@@ -3,8 +3,11 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from app.dao.product_dao import ProductDAO
 
-
 router = APIRouter(prefix="/products", tags=["products"])
+
+
+#router = APIRouter(prefix="/products", tags=["products"])
+
 
 @router.get("/")
 def list_products(
