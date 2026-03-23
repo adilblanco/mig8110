@@ -36,9 +36,9 @@ class ProductDAO:
             "code": row[0],
             "name": row[1],
             "brand": row[2],
-            "category": row[3]
+            "category": row[3],
             "ingredients": row[4],
-            "nutriments": row[5]
+            "nutriments": row[5],
             "energy_100g": row[5],
             "fat_100g": row[5],
             "sugars_100g": row[5],

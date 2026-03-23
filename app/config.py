@@ -4,8 +4,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DUCKDB_TOKEN = os.getenv("DUCKDB_TOKEN")
-DUCKDB_DB = os.getenv("DUCKDB_DB","my_db")
+DUCKDB_TOKEN = os.getenv("TOKEN_DUCKDB")
+DUCKDB_DB = os.getenv("DB_DUCKDB","my_db")
+
 TABLE_NAME = "raw.products"
 
 if not DUCKDB_TOKEN or not DUCKDB_DB:

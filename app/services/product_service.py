@@ -1,5 +1,4 @@
 from typing import Optional
-from dao.product_dao import ProductDAO
 from app.dao.product_dao import ProductDAO      # get_product_by_code
 from app.dao.nutriment_dao import NutrimentDAO  #get_nutrients_by_product_code
 from app.dao.ingredient_dao import IngredientDAO #get_ingredients_by_product_code

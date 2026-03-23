@@ -1,6 +1,7 @@
 import os
 import duckdb
 from dotenv import load_dotenv
+from typing import List, Dict, Any
 
 load_dotenv()
 
@@ -19,7 +20,7 @@ def execute_query(sql: str, params: List[Any] = None) -> List[Dict]:
     return [dict(zip(cols, row)) for row in rows]
 
 def get_connection1():
-    conn = duckdb.connect(f"md:{DB_DUCKDB}",,read_only=True)
+    conn = duckdb.connect(f"md:{DB_DUCKDB}",read_only=True)
 
     conn.execute("INSTALL motherduck")
     conn.execute("LOAD motherduck")
