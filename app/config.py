@@ -14,8 +14,8 @@ if not DUCKDB_TOKEN or not DUCKDB_DB:
 
 
 DATABASE_PATH = f"md:{DUCKDB_DB}?motherduck_token={DUCKDB_TOKEN}"
-#conn_str = f"md:{DUCKDB_DB}?motherduck_token={DUCKDB_TOKEN}"
-#db = duckdb.connect(conn_str, read_only=True)
+conn_str = f"md:{DUCKDB_DB}?motherduck_token={DUCKDB_TOKEN}"
+db = duckdb.connect(conn_str, read_only=True)
 
 # Nutriments standards (Suffixe _NUTRIMENT pour la clarté)
 ENERGY_NUTRIMENT = "energy_100g"
