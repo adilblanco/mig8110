@@ -4,17 +4,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DUCKDB_TOKEN = os.getenv("TOKEN_DUCKDB")
-DUCKDB_DB = os.getenv("DB_DUCKDB","my_db")
+TOKEN_DUCKDB = os.getenv("TOKEN_DUCKDB")
+DB_DUCKDB = os.getenv("DB_DUCKDB","my_db")
 
 TABLE_NAME = "raw.products"
 
-if not DUCKDB_TOKEN or not DUCKDB_DB:
-    raise RuntimeError("DUCKDB_TOKEN et/ou DUCKDB_DB manquants dans .env")
+if not TOKEN_DUCKDB or not DB_DUCKDB:
+    raise RuntimeError("TOKEN_DUCKDB et/ou DB_DUCKDB manquants dans .env")
 
 
-DATABASE_PATH = f"md:{DUCKDB_DB}?motherduck_token={DUCKDB_TOKEN}"
-conn_str = f"md:{DUCKDB_DB}?motherduck_token={DUCKDB_TOKEN}"
+DATABASE_PATH = f"md:{DB_DUCKDB}?motherduck_token={TOKEN_DUCKDB}"
+conn_str = f"md:{DB_DUCKDB}?motherduck_token={TOKEN_DUCKDB}"
 db = duckdb.connect(conn_str, read_only=True)
 
 # Nutriments standards (Suffixe _NUTRIMENT pour la clarté)
