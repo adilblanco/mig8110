@@ -35,4 +35,6 @@ TARGET_COLUMNS = [
     'calcium_100g',
     'iron_100g',
     'potassium_100g',
+    "ingredients_normalized"
+    
 ]
