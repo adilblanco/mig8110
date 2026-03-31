@@ -53,12 +53,14 @@ GENERIC_INGREDIENTS = {
 def _extract_product_name(product_name_list):
     if product_name_list is None:
         return None
+
     try:
         for item in product_name_list:
-            if item["lang"] == "main":
-                return item["text"]
+            if isinstance(item, dict) and item.get("lang") == "main":
+                return item.get("text")
     except TypeError:
         return None
+
     return None
 
 
@@ -70,10 +72,11 @@ def _build_code_path(code):
 def _extract_image_url(images_list, code, image_key):
     if images_list is None:
         return None
+
     try:
         for item in images_list:
-            if item["key"] == image_key:
-                rev = item["rev"]
+            if isinstance(item, dict) and item.get("key") == image_key:
+                rev = item.get("rev")
                 if rev is not None:
                     return (
                         f"{BASE_IMAGE_URL}/"
@@ -82,21 +85,24 @@ def _extract_image_url(images_list, code, image_key):
                     )
     except TypeError:
         return None
+
     return None
 
 
 def _extract_nutriment(nutriments_list, nutriment_name):
     if nutriments_list is None:
         return None
+
     try:
         for item in nutriments_list:
-            if item["name"] == nutriment_name:
+            if isinstance(item, dict) and item.get("name") == nutriment_name:
                 value = item.get("100g")
                 if value is None:
                     return None
                 return round(value, 2)
     except TypeError:
         return None
+
     return None
 
 
@@ -121,16 +127,29 @@ def _normalize_ingredient_tag(tag):
 
 def _normalize_ingredients(tags):
     """
-    Utilise uniquement ingredients_original_tags.
-    Normalisation + déduplication.
+    Normalise ingredients_original_tags même si la valeur n'est pas
+    une list Python stricte (ex: numpy.ndarray, array-like, etc.).
     """
-    if not isinstance(tags, list):
+    if tags is None:
+        return []
+
+    if isinstance(tags, str):
+        return []
+
+    if isinstance(tags, (list, tuple)):
+        values = tags
+    elif hasattr(tags, "__iter__"):
+        try:
+            values = list(tags)
+        except TypeError:
+            return []
+    else:
         return []
 
     normalized = []
     seen = set()
 
-    for tag in tags:
+    for tag in values:
         cleaned = _normalize_ingredient_tag(tag)
         if cleaned and cleaned not in seen:
             normalized.append(cleaned)
@@ -185,6 +204,21 @@ def handle(input_file_key, output_file_key):
         _normalize_ingredients
     )
 
+    # Logs de debug utiles pour vérifier le vrai format des ingrédients
+    if not df.empty:
+        logger.info(
+            "Sample ingredients_original_tags type: %s",
+            type(df["ingredients_original_tags"].iloc[0]),
+        )
+        logger.info(
+            "Sample ingredients_original_tags value: %s",
+            df["ingredients_original_tags"].iloc[0],
+        )
+        logger.info(
+            "Sample ingredients_normalized value: %s",
+            df["ingredients_normalized"].iloc[0],
+        )
+
     # nutriscore_grade / ecoscore_grade: normalisation des valeurs hors whitelist.
     df["nutriscore_grade"] = df["nutriscore_grade"].where(
         df["nutriscore_grade"].isin(["a", "b", "c", "d", "e"]),
@@ -199,7 +233,10 @@ def handle(input_file_key, output_file_key):
     for col in TARGET_COLUMNS:
         if col not in df.columns:
             df[col] = None
+
     df = df[TARGET_COLUMNS]
+
+    logger.info("Final columns before upload: %s", df.columns.tolist())
 
     s3_handler.upload_dataframe(df, output_file_key)
 
