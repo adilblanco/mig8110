@@ -110,10 +110,14 @@ def _normalize_ingredient_tag(tag):
     if not isinstance(tag, str):
         return None
 
+    # enlever "en:"
     if ":" in tag:
         tag = tag.split(":", 1)[1]
 
+    # remplacer "-"
     tag = tag.replace("-", " ")
+
+    # nettoyer
     tag = tag.strip().lower()
 
     if not tag:
@@ -127,8 +131,7 @@ def _normalize_ingredient_tag(tag):
 
 def _normalize_ingredients(tags):
     """
-    Normalise ingredients_original_tags même si la valeur n'est pas
-    une list Python stricte (ex: numpy.ndarray, array-like, etc.).
+    Normalise ingredients_original_tags même si ce n'est pas une vraie list Python.
     """
     if tags is None:
         return []
@@ -176,50 +179,36 @@ def handle(input_file_key, output_file_key):
     parquet_bytes = s3_handler.download_to_memory(input_file_key)
     df = pd.read_parquet(parquet_bytes)
 
-    # product_name: Open Food Facts stocke le nom du produit comme une liste
-    # d'objets [{lang, text}, ...]. On extrait uniquement le texte associé à
-    # lang="main", qui représente le nom canonique du produit.
+    # product_name
     df["product_name"] = df["product_name"].apply(_extract_product_name)
 
-    # image URLs: reconstruction des URLs à partir du code produit et de la révision.
+    # image URLs
     for image_key, col_name in IMAGE_KEYS:
         df[col_name] = [
             _extract_image_url(images, code, image_key)
             for images, code in zip(df["images"], df["code"])
         ]
 
-    # nutriments: pivot des valeurs nutritionnelles en colonnes plates.
+    # nutriments
     for nutriment_name, col_name in NUTRIMENTS:
         df[col_name] = df["nutriments"].apply(
             lambda lst, n=nutriment_name: _extract_nutriment(lst, n)
         )
 
-    # ingredients_normalized: normalisation de ingredients_original_tags
-    # - retrait du préfixe langue (ex: en:)
-    # - remplacement des tirets par des espaces
-    # - passage en minuscule
-    # - suppression des termes trop génériques
-    # - déduplication
+    # 🔥 ingredients_normalized (LIST → STRING)
     df["ingredients_normalized"] = df["ingredients_original_tags"].apply(
         _normalize_ingredients
     )
 
-    # Logs de debug utiles pour vérifier le vrai format des ingrédients
-    if not df.empty:
-        logger.info(
-            "Sample ingredients_original_tags type: %s",
-            type(df["ingredients_original_tags"].iloc[0]),
-        )
-        logger.info(
-            "Sample ingredients_original_tags value: %s",
-            df["ingredients_original_tags"].iloc[0],
-        )
-        logger.info(
-            "Sample ingredients_normalized value: %s",
-            df["ingredients_normalized"].iloc[0],
-        )
+    df["ingredients_normalized"] = df["ingredients_normalized"].apply(
+        lambda x: ", ".join(x) if isinstance(x, list) and len(x) > 0 else None
+    )
 
-    # nutriscore_grade / ecoscore_grade: normalisation des valeurs hors whitelist.
+    # Debug
+    if not df.empty:
+        logger.info(f"Sample ingredients: {df['ingredients_normalized'].iloc[0]}")
+
+    # nutriscore / ecoscore
     df["nutriscore_grade"] = df["nutriscore_grade"].where(
         df["nutriscore_grade"].isin(["a", "b", "c", "d", "e"]),
         None,
@@ -229,14 +218,14 @@ def handle(input_file_key, output_file_key):
         None,
     )
 
-    # Projection finale sur TARGET_COLUMNS.
+    # Projection finale
     for col in TARGET_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
     df = df[TARGET_COLUMNS]
 
-    logger.info("Final columns before upload: %s", df.columns.tolist())
+    logger.info(f"Final columns: {df.columns.tolist()}")
 
     s3_handler.upload_dataframe(df, output_file_key)
 
