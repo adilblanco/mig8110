@@ -14,7 +14,7 @@ TARGET_COLUMNS = [
     'countries_tags',
     'ecoscore_score',
     'ecoscore_grade',
-    'ingredients_tags',
+    'ingredients_normalized',
     'nutriscore_score',
     'nutriscore_grade',
     'front_url',
@@ -35,6 +35,6 @@ TARGET_COLUMNS = [
     'calcium_100g',
     'iron_100g',
     'potassium_100g',
-    'ingredients_normalized'
+    
     
 ]
