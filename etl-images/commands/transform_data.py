@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import pandas as pd
 from common.s3 import S3FileHandler
@@ -150,11 +151,21 @@ def _to_iterable(value):
     if value is None:
         return []
 
-    if isinstance(value, str):
-        return []
-
     if isinstance(value, (list, tuple)):
         return value
+
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+            return []
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return []
 
     if hasattr(value, "__iter__"):
         try:
@@ -166,9 +177,6 @@ def _to_iterable(value):
 
 
 def _normalize_ingredients(tags):
-    """
-    Normalisation de ingredients_original_tags.
-    """
     values = _to_iterable(tags)
 
     normalized = []
@@ -184,10 +192,6 @@ def _normalize_ingredients(tags):
 
 
 def _normalize_ingredient_object_name(item):
-    """
-    Pour la colonne `ingredients`, on garde tous les ingrédients.
-    Priorité à `text`, fallback sur `id`.
-    """
     if not isinstance(item, dict):
         return None
 
@@ -229,10 +233,6 @@ def _normalize_flag(value):
 
 
 def _format_ingredient_object(item):
-    """
-    Construit une représentation complète d'un ingrédient
-    en gardant les éléments importants dans une seule chaîne.
-    """
     if not isinstance(item, dict):
         return None
 
@@ -278,10 +278,6 @@ def _format_ingredient_object(item):
 
 
 def _collect_nested_ingredient_details(items, normalized, seen):
-    """
-    Parcours récursif de la colonne `ingredients`
-    en gardant tous les éléments et les sous-ingrédients.
-    """
     for item in _to_iterable(items):
         if not isinstance(item, dict):
             continue
@@ -297,17 +293,6 @@ def _collect_nested_ingredient_details(items, normalized, seen):
 
 
 def _normalize_ingredients_struct(ingredients):
-    """
-    Normalise la colonne `ingredients` en gardant :
-    - nom
-    - pourcentages
-    - vegan
-    - vegetarian
-    - from_palm_oil
-    - processing
-    - labels
-    - sous-ingrédients
-    """
     normalized = []
     seen = set()
 
@@ -317,9 +302,6 @@ def _normalize_ingredients_struct(ingredients):
 
 
 def _normalize_analysis_tags(tags):
-    """
-    Normalisation de ingredients_analysis_tags.
-    """
     values = _to_iterable(tags)
 
     normalized = []
@@ -364,38 +346,31 @@ def handle(input_file_key, output_file_key):
     parquet_bytes = s3_handler.download_to_memory(input_file_key)
     df = pd.read_parquet(parquet_bytes)
 
-    # product_name
     df["product_name"] = df["product_name"].apply(_extract_product_name)
 
-    # image URLs
     for image_key, col_name in IMAGE_KEYS:
         df[col_name] = [
             _extract_image_url(images, code, image_key)
             for images, code in zip(df["images"], df["code"])
         ]
 
-    # nutriments
     for nutriment_name, col_name in NUTRIMENTS:
         df[col_name] = df["nutriments"].apply(
             lambda lst, n=nutriment_name: _extract_nutriment(lst, n)
         )
 
-    # ingredients_original_tags -> colonne simple et lisible
     df["ingredients_normalized"] = df["ingredients_original_tags"].apply(
         _normalize_ingredients
     ).apply(_list_to_string)
 
-    # ingredients -> colonne riche dans la même colonne
     df["ingredients_struct_normalized"] = df["ingredients"].apply(
         _normalize_ingredients_struct
     ).apply(_list_to_string)
 
-    # ingredients_analysis_tags
     df["ingredients_analysis_normalized"] = df["ingredients_analysis_tags"].apply(
         _normalize_analysis_tags
     ).apply(_list_to_string)
 
-    # colonnes numériques liées aux ingrédients
     df["ingredients_percent_analysis"] = df["ingredients_percent_analysis"].apply(
         _safe_numeric
     )
@@ -404,12 +379,9 @@ def handle(input_file_key, output_file_key):
     )
     df["ingredients_n"] = df["ingredients_n"].apply(_safe_numeric)
 
-    # Debug
     if not df.empty:
-        logger.info(
-            "Sample ingredients_normalized: %s",
-            df["ingredients_normalized"].iloc[0],
-        )
+        logger.info("Sample ingredients raw type: %s", type(df["ingredients"].iloc[0]))
+        logger.info("Sample ingredients raw value: %s", df["ingredients"].iloc[0])
         logger.info(
             "Sample ingredients_struct_normalized: %s",
             df["ingredients_struct_normalized"].iloc[0],
@@ -419,7 +391,6 @@ def handle(input_file_key, output_file_key):
             df["ingredients_analysis_normalized"].iloc[0],
         )
 
-    # nutriscore / ecoscore
     df["nutriscore_grade"] = df["nutriscore_grade"].where(
         df["nutriscore_grade"].isin(["a", "b", "c", "d", "e"]),
         None,
@@ -429,7 +400,6 @@ def handle(input_file_key, output_file_key):
         None,
     )
 
-    # Projection finale
     for col in TARGET_COLUMNS:
         if col not in df.columns:
             df[col] = None
