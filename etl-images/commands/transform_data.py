@@ -122,6 +122,18 @@ def _normalize_tag(tag):
     return tag
 
 
+def _normalize_free_text(value):
+    if not isinstance(value, str):
+        return None
+
+    value = value.strip().lower()
+
+    if not value:
+        return None
+
+    return value
+
+
 def _normalize_ingredient_tag(tag):
     cleaned = _normalize_tag(tag)
 
@@ -171,36 +183,135 @@ def _normalize_ingredients(tags):
     return normalized
 
 
-def _collect_nested_ingredient_names(items, normalized, seen):
+def _normalize_ingredient_object_name(item):
     """
-    Parcours récursif de la colonne ingredients.
-    Priorité à text, fallback sur id.
+    Pour la colonne `ingredients`, on garde tous les ingrédients.
+    Priorité à `text`, fallback sur `id`.
+    """
+    if not isinstance(item, dict):
+        return None
+
+    raw_value = item.get("text")
+    if not raw_value:
+        raw_value = item.get("id")
+
+    if not isinstance(raw_value, str):
+        return None
+
+    if raw_value == item.get("id"):
+        cleaned = _normalize_tag(raw_value)
+    else:
+        cleaned = _normalize_free_text(raw_value)
+
+    return cleaned
+
+
+def _format_optional_percent(value):
+    if value is None:
+        return None
+
+    try:
+        return str(round(float(value), 2))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_flag(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "unknown"
+
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value:
+            return value
+
+    return "unknown"
+
+
+def _format_ingredient_object(item):
+    """
+    Construit une représentation complète d'un ingrédient
+    en gardant les éléments importants dans une seule chaîne.
+    """
+    if not isinstance(item, dict):
+        return None
+
+    name = _normalize_ingredient_object_name(item)
+    if not name:
+        return None
+
+    parts = []
+
+    percent = _format_optional_percent(item.get("percent"))
+    if percent is not None:
+        parts.append(f"percent={percent}%")
+
+    percent_estimate = _format_optional_percent(item.get("percent_estimate"))
+    if percent_estimate is not None:
+        parts.append(f"percent_estimate={percent_estimate}%")
+
+    percent_min = _format_optional_percent(item.get("percent_min"))
+    if percent_min is not None:
+        parts.append(f"percent_min={percent_min}%")
+
+    percent_max = _format_optional_percent(item.get("percent_max"))
+    if percent_max is not None:
+        parts.append(f"percent_max={percent_max}%")
+
+    parts.append(f"vegan={_normalize_flag(item.get('vegan'))}")
+    parts.append(f"vegetarian={_normalize_flag(item.get('vegetarian'))}")
+    parts.append(f"from_palm_oil={_normalize_flag(item.get('from_palm_oil'))}")
+
+    processing = _normalize_tag(item.get("processing"))
+    if processing:
+        parts.append(f"processing={processing}")
+
+    labels = _normalize_tag(item.get("labels"))
+    if labels:
+        parts.append(f"labels={labels}")
+
+    origins = _normalize_free_text(item.get("origins"))
+    if origins:
+        parts.append(f"origins={origins}")
+
+    return f"{name} [{' ; '.join(parts)}]"
+
+
+def _collect_nested_ingredient_details(items, normalized, seen):
+    """
+    Parcours récursif de la colonne `ingredients`
+    en gardant tous les éléments et les sous-ingrédients.
     """
     for item in _to_iterable(items):
         if not isinstance(item, dict):
             continue
 
-        raw_value = item.get("text") or item.get("id")
-        cleaned = _normalize_ingredient_tag(raw_value)
-
+        cleaned = _format_ingredient_object(item)
         if cleaned and cleaned not in seen:
             normalized.append(cleaned)
             seen.add(cleaned)
 
         nested_items = item.get("ingredients")
         if nested_items:
-            _collect_nested_ingredient_names(nested_items, normalized, seen)
+            _collect_nested_ingredient_details(nested_items, normalized, seen)
 
 
 def _normalize_ingredients_struct(ingredients):
     """
-    Normalisation de la colonne ingredients
-    (liste d'objets imbriqués).
+    Normalise la colonne `ingredients` en gardant :
+    - nom
+    - pourcentages
+    - vegan
+    - vegetarian
+    - from_palm_oil
+    - processing
+    - labels
+    - sous-ingrédients
     """
     normalized = []
     seen = set()
 
-    _collect_nested_ingredient_names(ingredients, normalized, seen)
+    _collect_nested_ingredient_details(ingredients, normalized, seen)
 
     return normalized
 
@@ -269,17 +380,17 @@ def handle(input_file_key, output_file_key):
             lambda lst, n=nutriment_name: _extract_nutriment(lst, n)
         )
 
-    # ingredients_original_tags -> ingredients_normalized
+    # ingredients_original_tags -> colonne simple et lisible
     df["ingredients_normalized"] = df["ingredients_original_tags"].apply(
         _normalize_ingredients
     ).apply(_list_to_string)
 
-    # ingredients (objets imbriqués) -> ingredients_struct_normalized
+    # ingredients -> colonne riche dans la même colonne
     df["ingredients_struct_normalized"] = df["ingredients"].apply(
         _normalize_ingredients_struct
     ).apply(_list_to_string)
 
-    # ingredients_analysis_tags -> ingredients_analysis_normalized
+    # ingredients_analysis_tags
     df["ingredients_analysis_normalized"] = df["ingredients_analysis_tags"].apply(
         _normalize_analysis_tags
     ).apply(_list_to_string)
@@ -293,7 +404,7 @@ def handle(input_file_key, output_file_key):
     )
     df["ingredients_n"] = df["ingredients_n"].apply(_safe_numeric)
 
-    # debug
+    # Debug
     if not df.empty:
         logger.info(
             "Sample ingredients_normalized: %s",
@@ -318,7 +429,7 @@ def handle(input_file_key, output_file_key):
         None,
     )
 
-    # projection finale
+    # Projection finale
     for col in TARGET_COLUMNS:
         if col not in df.columns:
             df[col] = None
