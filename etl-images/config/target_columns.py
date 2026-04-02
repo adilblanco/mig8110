@@ -38,4 +38,5 @@ TARGET_COLUMNS = [
     # Colonnes ingrédients normalisées
 
    "ingredients_n",
+   "ingredients"
 ]
