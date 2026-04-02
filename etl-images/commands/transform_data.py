@@ -176,7 +176,7 @@ def _to_iterable(value):
     return []
 
 
-def _normalize_ingredients(tags):
+def _normalize_ingredients_list(tags):
     values = _to_iterable(tags)
 
     normalized = []
@@ -292,7 +292,7 @@ def _collect_nested_ingredient_details(items, normalized, seen):
             _collect_nested_ingredient_details(nested_items, normalized, seen)
 
 
-def _normalize_ingredients_struct(ingredients):
+def _normalize_ingredients_structure(ingredients):
     normalized = []
     seen = set()
 
@@ -301,7 +301,7 @@ def _normalize_ingredients_struct(ingredients):
     return normalized
 
 
-def _normalize_analysis_tags(tags):
+def _normalize_ingredients_analysis(tags):
     values = _to_iterable(tags)
 
     normalized = []
@@ -359,18 +359,22 @@ def handle(input_file_key, output_file_key):
             lambda lst, n=nutriment_name: _extract_nutriment(lst, n)
         )
 
-    df["ingredients_normalized"] = df["ingredients_original_tags"].apply(
-        _normalize_ingredients
+    # ingredients_original_tags -> ingredients_list
+    df["ingredients_list"] = df["ingredients_original_tags"].apply(
+        _normalize_ingredients_list
     ).apply(_list_to_string)
 
-    df["ingredients_struct_normalized"] = df["ingredients"].apply(
-        _normalize_ingredients_struct
+    # ingredients -> ingredients_structure
+    df["ingredients_structure"] = df["ingredients"].apply(
+        _normalize_ingredients_structure
     ).apply(_list_to_string)
 
-    df["ingredients_analysis_normalized"] = df["ingredients_analysis_tags"].apply(
-        _normalize_analysis_tags
+    # ingredients_analysis_tags -> ingredients_analysis
+    df["ingredients_analysis"] = df["ingredients_analysis_tags"].apply(
+        _normalize_ingredients_analysis
     ).apply(_list_to_string)
 
+    # colonnes numériques conservées
     df["ingredients_percent_analysis"] = df["ingredients_percent_analysis"].apply(
         _safe_numeric
     )
@@ -383,12 +387,12 @@ def handle(input_file_key, output_file_key):
         logger.info("Sample ingredients raw type: %s", type(df["ingredients"].iloc[0]))
         logger.info("Sample ingredients raw value: %s", df["ingredients"].iloc[0])
         logger.info(
-            "Sample ingredients_struct_normalized: %s",
-            df["ingredients_struct_normalized"].iloc[0],
+            "Sample ingredients_structure: %s",
+            df["ingredients_structure"].iloc[0],
         )
         logger.info(
-            "Sample ingredients_analysis_normalized: %s",
-            df["ingredients_analysis_normalized"].iloc[0],
+            "Sample ingredients_analysis: %s",
+            df["ingredients_analysis"].iloc[0],
         )
 
     df["nutriscore_grade"] = df["nutriscore_grade"].where(
