@@ -60,8 +60,8 @@ TRANSFORMED_FILE_KEY = f"{DAG_ID}/data_transformed.parquet"
 FILTER_COLUMNS = ",".join([
     "code", "brands", "product_name", "product_quantity", "product_quantity_unit",
     "quantity", "serving_quantity", "serving_size", "categories_tags", "countries_tags",
-    "ecoscore_score", "ecoscore_grade", "images", 
-     "ingredients_analysis_tags", "ingredients_percent_analysis",
+    "ecoscore_score", "ecoscore_grade", "images",
+    "ingredients_analysis_tags", "ingredients_percent_analysis",
     "ingredients_from_palm_oil_n", "ingredients_n",
     "nutriscore_score", "nutriscore_grade", "nutriments",
 ])
@@ -200,117 +200,6 @@ with dag:
         duckdb_conn_id="duckdb_default",
     )
 
-    create_ingredients_table = DuckDBOperator(
-        dag=dag,
-        task_id="create-ingredients-table",
-        sql="""
-            CREATE OR REPLACE TABLE off.staging.ingredients AS
-            WITH exploded AS (
-                SELECT
-                    trim(unnest(string_split(ingredients_list, ','))) AS ingredient_name
-                FROM off.staging.source_transformed
-                WHERE ingredients_list IS NOT NULL
-            )
-            SELECT
-                row_number() OVER (ORDER BY ingredient_name) AS ingredient_id,
-                ingredient_name
-            FROM (
-                SELECT DISTINCT ingredient_name
-                FROM exploded
-                WHERE ingredient_name IS NOT NULL
-                  AND ingredient_name <> ''
-            ) t;
-        """,
-        duckdb_conn_id="duckdb_default",
-    )
-
-    create_product_ingredients_table = DuckDBOperator(
-        dag=dag,
-        task_id="create-product-ingredients-table",
-        sql="""
-            CREATE OR REPLACE TABLE off.staging.product_ingredients AS
-            WITH exploded AS (
-                SELECT
-                    code,
-                    trim(unnest(string_split(ingredients_list, ','))) AS ingredient_name
-                FROM off.staging.source_transformed
-                WHERE ingredients_list IS NOT NULL
-            )
-            SELECT
-                p.code,
-                i.ingredient_id,
-                i.ingredient_name
-            FROM exploded p
-            JOIN off.staging.ingredients i
-                ON p.ingredient_name = i.ingredient_name
-            WHERE p.ingredient_name IS NOT NULL
-              AND p.ingredient_name <> '';
-        """,
-        duckdb_conn_id="duckdb_default",
-    )
-
-    create_product_ingredients_detailed_table = DuckDBOperator(
-        dag=dag,
-        task_id="create-product-ingredients-detailed-table",
-        sql="""
-            CREATE OR REPLACE TABLE off.staging.product_ingredients_detailed AS
-            WITH exploded AS (
-                SELECT
-                    code,
-                    trim(unnest(string_split(ingredients_structure, '], '))) AS ingredient_chunk
-                FROM off.staging.source_transformed
-                WHERE ingredients_structure IS NOT NULL
-            ),
-            parsed AS (
-                SELECT
-                    code,
-                    trim(regexp_extract(ingredient_chunk, '^(.*?) \\[', 1)) AS ingredient_name,
-                    TRY_CAST(NULLIF(regexp_extract(ingredient_chunk, 'percent_estimate=([0-9.]+)%', 1), '') AS DOUBLE) AS percent_estimate,
-                    TRY_CAST(NULLIF(regexp_extract(ingredient_chunk, 'percent_min=([0-9.]+)%', 1), '') AS DOUBLE) AS percent_min,
-                    TRY_CAST(NULLIF(regexp_extract(ingredient_chunk, 'percent_max=([0-9.]+)%', 1), '') AS DOUBLE) AS percent_max,
-                    NULLIF(regexp_extract(ingredient_chunk, 'vegan=([^;\\]]+)', 1), '') AS vegan,
-                    NULLIF(regexp_extract(ingredient_chunk, 'vegetarian=([^;\\]]+)', 1), '') AS vegetarian,
-                    NULLIF(regexp_extract(ingredient_chunk, 'from_palm_oil=([^;\\]]+)', 1), '') AS from_palm_oil,
-                    NULLIF(regexp_extract(ingredient_chunk, 'processing=([^;\\]]+)', 1), '') AS processing
-                FROM exploded
-            )
-            SELECT
-                p.code,
-                i.ingredient_id,
-                p.ingredient_name,
-                p.percent_estimate,
-                p.percent_min,
-                p.percent_max,
-                p.vegan,
-                p.vegetarian,
-                p.from_palm_oil,
-                p.processing
-            FROM parsed p
-            LEFT JOIN off.staging.ingredients i
-                ON p.ingredient_name = i.ingredient_name
-            WHERE p.ingredient_name IS NOT NULL
-              AND p.ingredient_name <> '';
-        """,
-        duckdb_conn_id="duckdb_default",
-    )
-
-    create_product_ingredient_summary_table = DuckDBOperator(
-        dag=dag,
-        task_id="create-product-ingredient-summary-table",
-        sql="""
-            CREATE OR REPLACE TABLE off.staging.product_ingredient_summary AS
-            SELECT
-                code,
-                ingredients_analysis,
-                ingredients_percent_analysis,
-                ingredients_from_palm_oil_n,
-                ingredients_n
-            FROM off.staging.source_transformed
-            WHERE code IS NOT NULL;
-        """,
-        duckdb_conn_id="duckdb_default",
-    )
-
     load_rejected = CustomKubernetesPodOperator(
         dag=dag,
         task_id="load-rejected",
@@ -328,20 +217,6 @@ with dag:
     end = EmptyOperator(task_id="end")
 
     start >> create_schemas >> extract_data >> filter_data >> load_bronze >> validate_data >> transform_data >> load_silver
-
     load_silver >> create_products_table
-    load_silver >> create_ingredients_table
-    load_silver >> create_product_ingredient_summary_table
     load_silver >> load_rejected
-
-    create_ingredients_table >> create_product_ingredients_table
-    create_ingredients_table >> create_product_ingredients_detailed_table
-    load_silver >> create_product_ingredients_detailed_table
-
-    [
-        create_products_table,
-        create_product_ingredients_table,
-        create_product_ingredients_detailed_table,
-        create_product_ingredient_summary_table,
-        load_rejected,
-    ] >> end
+    [create_products_table, load_rejected] >> end
