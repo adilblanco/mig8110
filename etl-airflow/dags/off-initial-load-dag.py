@@ -60,9 +60,7 @@ TRANSFORMED_FILE_KEY = f"{DAG_ID}/data_transformed.parquet"
 FILTER_COLUMNS = ",".join([
     "code", "brands", "product_name", "product_quantity", "product_quantity_unit",
     "quantity", "serving_quantity", "serving_size", "categories_tags", "countries_tags",
-    "ecoscore_score", "ecoscore_grade", "images",
-    "ingredients_analysis_tags", "ingredients_percent_analysis",
-    "ingredients_from_palm_oil_n", "ingredients_n",
+    "ecoscore_score", "ecoscore_grade", "images", "ingredients_n",
     "nutriscore_score", "nutriscore_grade", "nutriments",
 ])
 
