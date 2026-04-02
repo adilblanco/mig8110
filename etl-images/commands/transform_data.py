@@ -386,15 +386,21 @@ def handle(input_file_key, output_file_key):
     df["ingredients_n"] = df["ingredients_n"].apply(_safe_numeric)
 
     if not df.empty:
-        logger.info("Sample ingredients raw type: %s", type(df["ingredients"].iloc[0]))
-        logger.info("Sample ingredients raw value: %s", df["ingredients"].iloc[0])
-        # logger.info(
-        #     "Sample ingredients_structure: %s",
-        #     df["ingredients_structure"].iloc[0],
-        # )
         logger.info(
             "Sample ingredients_analysis: %s",
             df["ingredients_analysis"].iloc[0],
+        )
+        logger.info(
+            "Sample ingredients_percent_analysis: %s",
+            df["ingredients_percent_analysis"].iloc[0],
+        )
+        logger.info(
+            "Sample ingredients_from_palm_oil_n: %s",
+            df["ingredients_from_palm_oil_n"].iloc[0],
+        )
+        logger.info(
+            "Sample ingredients_n: %s",
+            df["ingredients_n"].iloc[0],
         )
 
     df["nutriscore_grade"] = df["nutriscore_grade"].where(
