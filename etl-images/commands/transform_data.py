@@ -1,5 +1,4 @@
 import os
-import json
 import logging
 import pandas as pd
 from common.s3 import S3FileHandler
@@ -32,23 +31,6 @@ IMAGE_KEYS = [
     ("nutrition_en", "nutrition_url"),
     ("packaging_en", "packaging_url"),
 ]
-
-GENERIC_INGREDIENTS = {
-    "added sugar",
-    "disaccharide",
-    "monosaccharide",
-    "polysaccharide",
-    "carbohydrate",
-    "sweetener",
-    "dairy",
-    "milk product",
-    "plant",
-    "fruit",
-    "ferment",
-    "enzyme",
-    "compound ingredient",
-    "preparation",
-}
 
 
 def _extract_product_name(product_name_list):
@@ -123,191 +105,17 @@ def _normalize_tag(tag):
     return tag
 
 
-def _normalize_free_text(value):
-    if not isinstance(value, str):
-        return None
-
-    value = value.strip().lower()
-
-    if not value:
-        return None
-
-    return value
-
-
-def _normalize_ingredient_tag(tag):
-    cleaned = _normalize_tag(tag)
-
-    if not cleaned:
-        return None
-
-    if cleaned in GENERIC_INGREDIENTS:
-        return None
-
-    return cleaned
-
-
-def _to_iterable(value):
-    if value is None:
+def _normalize_ingredients_analysis(tags):
+    if tags is None:
         return []
 
-    if isinstance(value, (list, tuple)):
-        return value
-
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return []
-
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return parsed
-            return []
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return []
-
-    if hasattr(value, "__iter__"):
-        try:
-            return list(value)
-        except TypeError:
-            return []
-
-    return []
-
-
-def _normalize_ingredients_list(tags):
-    values = _to_iterable(tags)
+    if not isinstance(tags, (list, tuple)):
+        return []
 
     normalized = []
     seen = set()
 
-    for tag in values:
-        cleaned = _normalize_ingredient_tag(tag)
-        if cleaned and cleaned not in seen:
-            normalized.append(cleaned)
-            seen.add(cleaned)
-
-    return normalized
-
-
-def _normalize_ingredient_object_name(item):
-    if not isinstance(item, dict):
-        return None
-
-    raw_value = item.get("text")
-    if not raw_value:
-        raw_value = item.get("id")
-
-    if not isinstance(raw_value, str):
-        return None
-
-    if raw_value == item.get("id"):
-        cleaned = _normalize_tag(raw_value)
-    else:
-        cleaned = _normalize_free_text(raw_value)
-
-    return cleaned
-
-
-def _format_optional_percent(value):
-    if value is None:
-        return None
-
-    try:
-        return str(round(float(value), 2))
-    except (TypeError, ValueError):
-        return None
-
-
-def _normalize_flag(value):
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return "unknown"
-
-    if isinstance(value, str):
-        value = value.strip().lower()
-        if value:
-            return value
-
-    return "unknown"
-
-
-def _format_ingredient_object(item):
-    if not isinstance(item, dict):
-        return None
-
-    name = _normalize_ingredient_object_name(item)
-    if not name:
-        return None
-
-    parts = []
-
-    percent = _format_optional_percent(item.get("percent"))
-    if percent is not None:
-        parts.append(f"percent={percent}%")
-
-    percent_estimate = _format_optional_percent(item.get("percent_estimate"))
-    if percent_estimate is not None:
-        parts.append(f"percent_estimate={percent_estimate}%")
-
-    percent_min = _format_optional_percent(item.get("percent_min"))
-    if percent_min is not None:
-        parts.append(f"percent_min={percent_min}%")
-
-    percent_max = _format_optional_percent(item.get("percent_max"))
-    if percent_max is not None:
-        parts.append(f"percent_max={percent_max}%")
-
-    parts.append(f"vegan={_normalize_flag(item.get('vegan'))}")
-    parts.append(f"vegetarian={_normalize_flag(item.get('vegetarian'))}")
-    parts.append(f"from_palm_oil={_normalize_flag(item.get('from_palm_oil'))}")
-
-    processing = _normalize_tag(item.get("processing"))
-    if processing:
-        parts.append(f"processing={processing}")
-
-    labels = _normalize_tag(item.get("labels"))
-    if labels:
-        parts.append(f"labels={labels}")
-
-    origins = _normalize_free_text(item.get("origins"))
-    if origins:
-        parts.append(f"origins={origins}")
-
-    return f"{name} [{' ; '.join(parts)}]"
-
-
-def _collect_nested_ingredient_details(items, normalized, seen):
-    for item in _to_iterable(items):
-        if not isinstance(item, dict):
-            continue
-
-        cleaned = _format_ingredient_object(item)
-        if cleaned and cleaned not in seen:
-            normalized.append(cleaned)
-            seen.add(cleaned)
-
-        nested_items = item.get("ingredients")
-        if nested_items:
-            _collect_nested_ingredient_details(nested_items, normalized, seen)
-
-
-def _normalize_ingredients_structure(ingredients):
-    normalized = []
-    seen = set()
-
-    _collect_nested_ingredient_details(ingredients, normalized, seen)
-
-    return normalized
-
-
-def _normalize_ingredients_analysis(tags):
-    values = _to_iterable(tags)
-
-    normalized = []
-    seen = set()
-
-    for tag in values:
+    for tag in tags:
         cleaned = _normalize_tag(tag)
         if cleaned and cleaned not in seen:
             normalized.append(cleaned)
@@ -359,24 +167,10 @@ def handle(input_file_key, output_file_key):
             lambda lst, n=nutriment_name: _extract_nutriment(lst, n)
         )
 
-    # ingredients_original_tags -> ingredients_list
-    # Conservé en commentaire pour réutilisation future
-    # df["ingredients_list"] = df["ingredients_original_tags"].apply(
-    #     _normalize_ingredients_list
-    # ).apply(_list_to_string)
-
-    # ingredients -> ingredients_structure
-    # Conservé en commentaire pour réutilisation future
-    # df["ingredients_structure"] = df["ingredients"].apply(
-    #     _normalize_ingredients_structure
-    # ).apply(_list_to_string)
-
-    # ingredients_analysis_tags -> ingredients_analysis
     df["ingredients_analysis"] = df["ingredients_analysis_tags"].apply(
         _normalize_ingredients_analysis
     ).apply(_list_to_string)
 
-    # colonnes numériques conservées
     df["ingredients_percent_analysis"] = df["ingredients_percent_analysis"].apply(
         _safe_numeric
     )
