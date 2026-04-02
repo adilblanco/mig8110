@@ -36,8 +36,8 @@ TARGET_COLUMNS = [
     "potassium_100g",
 
     # Colonnes ingrédients normalisées
-   "ingredients_list",
-   "ingredients_structure",
+    #"ingredients_list",
+    # "ingredients_structure",
    "ingredients_analysis",
    "ingredients_percent_analysis",
    "ingredients_from_palm_oil_n",

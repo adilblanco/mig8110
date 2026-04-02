@@ -360,14 +360,16 @@ def handle(input_file_key, output_file_key):
         )
 
     # ingredients_original_tags -> ingredients_list
-    df["ingredients_list"] = df["ingredients_original_tags"].apply(
-        _normalize_ingredients_list
-    ).apply(_list_to_string)
+    # Conservé en commentaire pour réutilisation future
+    # df["ingredients_list"] = df["ingredients_original_tags"].apply(
+    #     _normalize_ingredients_list
+    # ).apply(_list_to_string)
 
     # ingredients -> ingredients_structure
-    df["ingredients_structure"] = df["ingredients"].apply(
-        _normalize_ingredients_structure
-    ).apply(_list_to_string)
+    # Conservé en commentaire pour réutilisation future
+    # df["ingredients_structure"] = df["ingredients"].apply(
+    #     _normalize_ingredients_structure
+    # ).apply(_list_to_string)
 
     # ingredients_analysis_tags -> ingredients_analysis
     df["ingredients_analysis"] = df["ingredients_analysis_tags"].apply(
@@ -386,10 +388,10 @@ def handle(input_file_key, output_file_key):
     if not df.empty:
         logger.info("Sample ingredients raw type: %s", type(df["ingredients"].iloc[0]))
         logger.info("Sample ingredients raw value: %s", df["ingredients"].iloc[0])
-        logger.info(
-            "Sample ingredients_structure: %s",
-            df["ingredients_structure"].iloc[0],
-        )
+        # logger.info(
+        #     "Sample ingredients_structure: %s",
+        #     df["ingredients_structure"].iloc[0],
+        # )
         logger.info(
             "Sample ingredients_analysis: %s",
             df["ingredients_analysis"].iloc[0],
