@@ -71,6 +71,7 @@ with dag:
     start = EmptyOperator(task_id="start")
 
     create_schemas = DuckDBOperator(
+        dag=dag,
         task_id="create-schemas",
         sql=f"""
             CREATE SCHEMA IF NOT EXISTS {DATABASE_NAME}.{RAW_SCHEMA};
@@ -80,6 +81,7 @@ with dag:
     )
 
     extract_data = CustomKubernetesPodOperator(
+        dag=dag,
         task_id="extract-data",
         name="extract-data",
         image=IMAGE,
@@ -92,6 +94,7 @@ with dag:
     )
 
     filter_data = CustomKubernetesPodOperator(
+        dag=dag,
         task_id="filter-data",
         name="filter-data",
         image=IMAGE,
@@ -105,6 +108,7 @@ with dag:
     )
 
     load_bronze = CustomKubernetesPodOperator(
+        dag=dag,
         task_id="load-bronze",
         name="load-bronze",
         image=IMAGE,
@@ -118,6 +122,7 @@ with dag:
     )
 
     validate_data = CustomKubernetesPodOperator(
+        dag=dag,
         task_id="validate-data",
         name="validate-data",
         image=IMAGE,
@@ -131,6 +136,7 @@ with dag:
     )
 
     transform_data = CustomKubernetesPodOperator(
+        dag=dag,
         task_id="transform-data",
         name="transform-data",
         image=IMAGE,
@@ -143,6 +149,7 @@ with dag:
     )
 
     load_silver = CustomKubernetesPodOperator(
+        dag=dag,
         task_id="load-silver",
         name="load-silver",
         image=IMAGE,
@@ -155,8 +162,8 @@ with dag:
         ],
     )
 
-    # 🔥 NOUVELLE TABLE PRODUITS (GOLD LAYER)
     create_products_table = DuckDBOperator(
+        dag=dag,
         task_id="create-products-table",
         sql="""
             CREATE OR REPLACE TABLE off.staging.products AS
@@ -194,6 +201,7 @@ with dag:
     )
 
     load_rejected = CustomKubernetesPodOperator(
+        dag=dag,
         task_id="load-rejected",
         name="load-rejected",
         image=IMAGE,
@@ -208,7 +216,6 @@ with dag:
 
     end = EmptyOperator(task_id="end")
 
-    # 🔗 PIPELINE
     start >> create_schemas >> extract_data >> filter_data >> load_bronze >> validate_data >> transform_data >> load_silver
     load_silver >> create_products_table
     load_silver >> load_rejected
