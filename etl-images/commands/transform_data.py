@@ -89,47 +89,6 @@ def _extract_nutriment(nutriments_list, nutriment_name):
     return None
 
 
-def _normalize_tag(tag):
-    if not isinstance(tag, str):
-        return None
-
-    if ":" in tag:
-        tag = tag.split(":", 1)[1]
-
-    tag = tag.replace("-", " ")
-    tag = tag.strip().lower()
-
-    if not tag:
-        return None
-
-    return tag
-
-
-def _normalize_ingredients_analysis(tags):
-    if tags is None:
-        return []
-
-    if not isinstance(tags, (list, tuple)):
-        return []
-
-    normalized = []
-    seen = set()
-
-    for tag in tags:
-        cleaned = _normalize_tag(tag)
-        if cleaned and cleaned not in seen:
-            normalized.append(cleaned)
-            seen.add(cleaned)
-
-    return normalized
-
-
-def _list_to_string(values):
-    if isinstance(values, list) and len(values) > 0:
-        return ", ".join(values)
-    return None
-
-
 def _safe_numeric(value):
     if pd.isna(value):
         return None
@@ -154,58 +113,44 @@ def handle(input_file_key, output_file_key):
     parquet_bytes = s3_handler.download_to_memory(input_file_key)
     df = pd.read_parquet(parquet_bytes)
 
+    # product_name
     df["product_name"] = df["product_name"].apply(_extract_product_name)
 
+    # images
     for image_key, col_name in IMAGE_KEYS:
         df[col_name] = [
             _extract_image_url(images, code, image_key)
             for images, code in zip(df["images"], df["code"])
         ]
 
+    # nutriments
     for nutriment_name, col_name in NUTRIMENTS:
         df[col_name] = df["nutriments"].apply(
             lambda lst, n=nutriment_name: _extract_nutriment(lst, n)
         )
 
-    df["ingredients_analysis"] = df["ingredients_analysis_tags"].apply(
-        _normalize_ingredients_analysis
-    ).apply(_list_to_string)
-
-    df["ingredients_percent_analysis"] = df["ingredients_percent_analysis"].apply(
-        _safe_numeric
-    )
-    df["ingredients_from_palm_oil_n"] = df["ingredients_from_palm_oil_n"].apply(
-        _safe_numeric
-    )
+    # 👉 ON GARDE SEULEMENT ingredients_n
     df["ingredients_n"] = df["ingredients_n"].apply(_safe_numeric)
 
+    # debug
     if not df.empty:
-        logger.info(
-            "Sample ingredients_analysis: %s",
-            df["ingredients_analysis"].iloc[0],
-        )
-        logger.info(
-            "Sample ingredients_percent_analysis: %s",
-            df["ingredients_percent_analysis"].iloc[0],
-        )
-        logger.info(
-            "Sample ingredients_from_palm_oil_n: %s",
-            df["ingredients_from_palm_oil_n"].iloc[0],
-        )
         logger.info(
             "Sample ingredients_n: %s",
             df["ingredients_n"].iloc[0],
         )
 
+    # scores clean
     df["nutriscore_grade"] = df["nutriscore_grade"].where(
         df["nutriscore_grade"].isin(["a", "b", "c", "d", "e"]),
         None,
     )
+
     df["ecoscore_grade"] = df["ecoscore_grade"].where(
         df["ecoscore_grade"].isin(["a-plus", "a", "b", "c", "d", "e", "f"]),
         None,
     )
 
+    # projection finale
     for col in TARGET_COLUMNS:
         if col not in df.columns:
             df[col] = None
