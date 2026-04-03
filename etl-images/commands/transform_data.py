@@ -343,6 +343,17 @@ def _is_probable_noise(ingredient_id: Optional[str], ingredient_name: Optional[s
     if ingredient_id in NOISE_IDS:
         return True
 
+    if ingredient_name is None:
+        return True
+
+    if pd.isna(ingredient_name):
+        return True
+
+    if not isinstance(ingredient_name, str):
+        ingredient_name = str(ingredient_name)
+
+    ingredient_name = ingredient_name.strip()
+
     if not ingredient_name:
         return True
 
@@ -474,6 +485,10 @@ def _prepare_ingredients_and_links(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
         axis=1,
     )
 
+    links_df["ingredient_name"] = links_df["ingredient_name"].apply(
+        lambda x: x.strip() if isinstance(x, str) and x.strip() else None
+    )
+
     links_df["is_noise"] = links_df.apply(
         lambda r: _is_probable_noise(r.get("ingredient_id"), r.get("ingredient_name")),
         axis=1,
@@ -524,7 +539,7 @@ def handle(
 
     logger.info("Input rows: %s", len(df))
     if "ingredients" in df.columns and not df.empty:
-        logger.info("Sample ingredients type: %s", type(df['ingredients'].iloc[0]).__name__)
+        logger.info("Sample ingredients type: %s", type(df["ingredients"].iloc[0]).__name__)
 
     products_df = _prepare_products(df)
     ingredients_df, product_ingredients_df = _prepare_ingredients_and_links(df)
