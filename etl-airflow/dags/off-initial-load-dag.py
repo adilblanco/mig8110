@@ -168,7 +168,38 @@ with dag:
         dag=dag,
         task_id="create-products-table",
         sql=f"""
-            CREATE OR REPLACE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME} AS
+            DROP TABLE IF EXISTS {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME};
+
+            CREATE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME} (
+                code VARCHAR PRIMARY KEY,
+                product_name VARCHAR,
+                brands VARCHAR,
+                quantity VARCHAR,
+                serving_size VARCHAR,
+                ecoscore_score DOUBLE,
+                ecoscore_grade VARCHAR,
+                nutriscore_score DOUBLE,
+                nutriscore_grade VARCHAR,
+                front_url VARCHAR,
+                ingredients_url VARCHAR,
+                nutrition_url VARCHAR,
+                energy_kcal_100g DOUBLE,
+                fat_100g DOUBLE,
+                saturated_fat_100g DOUBLE,
+                trans_fat_100g DOUBLE,
+                cholesterol_100g DOUBLE,
+                sodium_100g DOUBLE,
+                salt_100g DOUBLE,
+                carbohydrates_100g DOUBLE,
+                fiber_100g DOUBLE,
+                sugars_100g DOUBLE,
+                proteins_100g DOUBLE,
+                calcium_100g DOUBLE,
+                iron_100g DOUBLE,
+                potassium_100g DOUBLE
+            );
+
+            INSERT INTO {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME}
             SELECT
                 code,
                 product_name,
@@ -206,7 +237,22 @@ with dag:
         dag=dag,
         task_id="create-ingredients-table",
         sql=f"""
-            CREATE OR REPLACE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME} AS
+            DROP TABLE IF EXISTS {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME};
+
+            CREATE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME} (
+                ingredient_id VARCHAR PRIMARY KEY,
+                ingredient_name VARCHAR NOT NULL,
+                is_in_taxonomy INTEGER,
+                vegan VARCHAR,
+                vegetarian VARCHAR,
+                from_palm_oil VARCHAR,
+                processing VARCHAR,
+                labels VARCHAR,
+                is_compound_ingredient INTEGER,
+                is_probable_noise INTEGER
+            );
+
+            INSERT INTO {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME}
             WITH RECURSIVE ingredient_nodes AS (
                 SELECT
                     s.code,
@@ -247,6 +293,7 @@ with dag:
                         THEN 1 ELSE 0
                     END AS is_compound_ingredient
                 FROM ingredient_nodes
+                WHERE json_extract_string(ingredient_json, '$.id') IS NOT NULL
             ),
             normalized AS (
                 SELECT
@@ -283,9 +330,44 @@ with dag:
                     labels,
                     is_compound_ingredient
                 FROM extracted
+            ),
+            dedup AS (
+                SELECT
+                    ingredient_id,
+                    ANY_VALUE(ingredient_name) AS ingredient_name,
+                    ANY_VALUE(is_in_taxonomy) AS is_in_taxonomy,
+                    ANY_VALUE(vegan) AS vegan,
+                    ANY_VALUE(vegetarian) AS vegetarian,
+                    ANY_VALUE(from_palm_oil) AS from_palm_oil,
+                    ANY_VALUE(processing) AS processing,
+                    ANY_VALUE(labels) AS labels,
+                    MAX(is_compound_ingredient) AS is_compound_ingredient,
+                    MAX(
+                        CASE
+                            WHEN ingredient_name IS NULL OR trim(ingredient_name) = '' THEN 1
+                            WHEN ingredient_name LIKE '%contains less than%' THEN 1
+                            WHEN ingredient_name LIKE '%may contain%' THEN 1
+                            WHEN ingredient_name LIKE '%manufactured in%' THEN 1
+                            WHEN ingredient_name LIKE '%facility that also processes%' THEN 1
+                            WHEN ingredient_name LIKE '%daily value%' THEN 1
+                            WHEN ingredient_name LIKE '%polyunsaturated fat%' THEN 1
+                            WHEN ingredient_name LIKE '%monounsaturated fat%' THEN 1
+                            WHEN ingredient_name LIKE '%cholesterol%' THEN 1
+                            WHEN ingredient_name LIKE '%sodium%' THEN 1
+                            WHEN ingredient_name LIKE '%total carbohydrate%' THEN 1
+                            WHEN ingredient_name LIKE '%dietary fiber%' THEN 1
+                            WHEN ingredient_name LIKE '%total sugars%' THEN 1
+                            WHEN ingredient_name LIKE '%vitamin d%' THEN 1
+                            WHEN ingredient_name LIKE '%potassium%' THEN 1
+                            WHEN length(ingredient_name) > 120 THEN 1
+                            ELSE 0
+                        END
+                    ) AS is_probable_noise
+                FROM normalized
                 WHERE ingredient_id IS NOT NULL
+                GROUP BY ingredient_id
             )
-            SELECT DISTINCT
+            SELECT
                 ingredient_id,
                 ingredient_name,
                 is_in_taxonomy,
@@ -295,27 +377,8 @@ with dag:
                 processing,
                 labels,
                 is_compound_ingredient,
-                CASE
-                    WHEN ingredient_name IS NULL OR trim(ingredient_name) = '' THEN 1
-                    WHEN ingredient_name LIKE '%contains less than%' THEN 1
-                    WHEN ingredient_name LIKE '%may contain%' THEN 1
-                    WHEN ingredient_name LIKE '%manufactured in%' THEN 1
-                    WHEN ingredient_name LIKE '%facility that also processes%' THEN 1
-                    WHEN ingredient_name LIKE '%daily value%' THEN 1
-                    WHEN ingredient_name LIKE '%polyunsaturated fat%' THEN 1
-                    WHEN ingredient_name LIKE '%monounsaturated fat%' THEN 1
-                    WHEN ingredient_name LIKE '%cholesterol%' THEN 1
-                    WHEN ingredient_name LIKE '%sodium%' THEN 1
-                    WHEN ingredient_name LIKE '%total carbohydrate%' THEN 1
-                    WHEN ingredient_name LIKE '%dietary fiber%' THEN 1
-                    WHEN ingredient_name LIKE '%total sugars%' THEN 1
-                    WHEN ingredient_name LIKE '%vitamin d%' THEN 1
-                    WHEN ingredient_name LIKE '%potassium%' THEN 1
-                    WHEN length(ingredient_name) > 120 THEN 1
-                    ELSE 0
-                END AS is_probable_noise
-            FROM normalized
-            WHERE ingredient_id IS NOT NULL;
+                is_probable_noise
+            FROM dedup;
         """,
         duckdb_conn_id="duckdb_default",
     )
@@ -324,7 +387,22 @@ with dag:
         dag=dag,
         task_id="create-product-ingredients-table",
         sql=f"""
-            CREATE OR REPLACE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME} AS
+            DROP TABLE IF EXISTS {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME};
+
+            CREATE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME} (
+                code VARCHAR,
+                ingredient_id VARCHAR,
+                ingredient_order INTEGER,
+                ingredient_level INTEGER,
+                parent_ingredient_id VARCHAR,
+                percent DOUBLE,
+                percent_min DOUBLE,
+                percent_max DOUBLE,
+                percent_estimate DOUBLE,
+                PRIMARY KEY (code, ingredient_id, ingredient_order, ingredient_level)
+            );
+
+            INSERT INTO {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME}
             WITH RECURSIVE ingredient_nodes AS (
                 SELECT
                     s.code,
@@ -348,46 +426,50 @@ with dag:
                 FROM ingredient_nodes n,
                      json_each(json_extract(n.ingredient_json, '$.ingredients')) child
                 WHERE json_extract(n.ingredient_json, '$.ingredients') IS NOT NULL
+            ),
+            extracted AS (
+                SELECT
+                    code,
+                    json_extract_string(ingredient_json, '$.id') AS ingredient_id,
+                    ingredient_order,
+                    ingredient_level,
+                    parent_ingredient_id,
+                    TRY_CAST(json_extract_string(ingredient_json, '$.percent') AS DOUBLE) AS percent,
+                    TRY_CAST(json_extract_string(ingredient_json, '$.percent_min') AS DOUBLE) AS percent_min,
+                    TRY_CAST(json_extract_string(ingredient_json, '$.percent_max') AS DOUBLE) AS percent_max,
+                    TRY_CAST(json_extract_string(ingredient_json, '$.percent_estimate') AS DOUBLE) AS percent_estimate
+                FROM ingredient_nodes
+                WHERE json_extract_string(ingredient_json, '$.id') IS NOT NULL
+            ),
+            dedup AS (
+                SELECT
+                    code,
+                    ingredient_id,
+                    ingredient_order,
+                    ingredient_level,
+                    ANY_VALUE(parent_ingredient_id) AS parent_ingredient_id,
+                    ANY_VALUE(percent) AS percent,
+                    ANY_VALUE(percent_min) AS percent_min,
+                    ANY_VALUE(percent_max) AS percent_max,
+                    ANY_VALUE(percent_estimate) AS percent_estimate
+                FROM extracted
+                GROUP BY
+                    code,
+                    ingredient_id,
+                    ingredient_order,
+                    ingredient_level
             )
             SELECT
                 code,
-                json_extract_string(ingredient_json, '$.id') AS ingredient_id,
+                ingredient_id,
                 ingredient_order,
                 ingredient_level,
                 parent_ingredient_id,
-                TRY_CAST(json_extract_string(ingredient_json, '$.percent') AS DOUBLE) AS percent,
-                TRY_CAST(json_extract_string(ingredient_json, '$.percent_min') AS DOUBLE) AS percent_min,
-                TRY_CAST(json_extract_string(ingredient_json, '$.percent_max') AS DOUBLE) AS percent_max,
-                TRY_CAST(json_extract_string(ingredient_json, '$.percent_estimate') AS DOUBLE) AS percent_estimate
-            FROM ingredient_nodes
-            WHERE json_extract_string(ingredient_json, '$.id') IS NOT NULL;
-        """,
-        duckdb_conn_id="duckdb_default",
-    )
-
-    create_constraints = DuckDBOperator(
-        dag=dag,
-        task_id="create-constraints",
-        sql=f"""
-            ALTER TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME}
-            ADD CONSTRAINT pk_products PRIMARY KEY (code);
-
-            ALTER TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME}
-            ADD CONSTRAINT pk_ingredients PRIMARY KEY (ingredient_id);
-
-            ALTER TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME}
-            ADD CONSTRAINT pk_product_ingredients
-            PRIMARY KEY (code, ingredient_id, ingredient_order, ingredient_level);
-
-            ALTER TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME}
-            ADD CONSTRAINT fk_product_ingredients_product
-            FOREIGN KEY (code)
-            REFERENCES {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME}(code);
-
-            ALTER TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME}
-            ADD CONSTRAINT fk_product_ingredients_ingredient
-            FOREIGN KEY (ingredient_id)
-            REFERENCES {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME}(ingredient_id);
+                percent,
+                percent_min,
+                percent_max,
+                percent_estimate
+            FROM dedup;
         """,
         duckdb_conn_id="duckdb_default",
     )
@@ -412,8 +494,7 @@ with dag:
 
     load_silver >> create_products_table
     load_silver >> create_ingredients_table
-    load_silver >> create_product_ingredients_table
+    [create_products_table, create_ingredients_table] >> create_product_ingredients_table
     load_silver >> load_rejected
 
-    [create_products_table, create_ingredients_table, create_product_ingredients_table] >> create_constraints
-    [create_constraints, load_rejected] >> end
+    [create_product_ingredients_table, load_rejected] >> end
