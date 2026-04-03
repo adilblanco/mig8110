@@ -4,7 +4,6 @@ from airflow.operators.empty import EmptyOperator
 from plugins.operators.duckdb_operator import DuckDBOperator
 from plugins.operators.custom_kubernetes_operator import CustomKubernetesPodOperator
 
-# Image
 IMAGE = "mig8110/etl-images:1.0.0"
 DAG_ID = "off_initial_load"
 
@@ -24,7 +23,6 @@ dag = DAG(
     tags=["mig8110", "off"],
 )
 
-# Connexions
 s3_env_vars = {
     "S3_ENDPOINT": "{{ conn.s3_conn.host }}",
     "S3_ACCESS_KEY": "{{ conn.s3_conn.login }}",
@@ -41,25 +39,25 @@ airflow_env_vars = {
     "AIRFLOW_CTX_DAG_RUN_ID": "{{ run_id }}",
 }
 
-# Base
 DATABASE_NAME = "off"
 RAW_SCHEMA = "raw"
 STAGING_SCHEMA = "staging"
 
 RAW_TABLE_NAME = "canada_products"
-STAGING_TABLE_NAME = "source_transformed"
 REJECTED_TABLE_NAME = "source_rejected"
 
 PRODUCTS_TABLE_NAME = "products"
 INGREDIENTS_TABLE_NAME = "ingredients"
 PRODUCT_INGREDIENTS_TABLE_NAME = "product_ingredients"
 
-# S3 keys
 RAW_FILE_KEY = f"{DAG_ID}/data.parquet"
 FILTERED_FILE_KEY = f"{DAG_ID}/data_filtered.parquet"
 VALID_FILE_KEY = f"{DAG_ID}/data_valid.parquet"
 INVALID_FILE_KEY = f"{DAG_ID}/data_invalid.parquet"
-TRANSFORMED_FILE_KEY = f"{DAG_ID}/data_transformed.parquet"
+
+PRODUCTS_FILE_KEY = f"{DAG_ID}/products.parquet"
+INGREDIENTS_FILE_KEY = f"{DAG_ID}/ingredients.parquet"
+PRODUCT_INGREDIENTS_FILE_KEY = f"{DAG_ID}/product_ingredients.parquet"
 
 FILTER_COLUMNS = ",".join([
     "code", "brands", "product_name", "product_quantity", "product_quantity_unit",
@@ -146,21 +144,9 @@ with dag:
         arguments=[
             "--command", "transform_data",
             "--input_file_key", VALID_FILE_KEY,
-            "--output_file_key", TRANSFORMED_FILE_KEY,
-        ],
-    )
-
-    load_silver = CustomKubernetesPodOperator(
-        dag=dag,
-        task_id="load-silver",
-        name="load-silver",
-        image=IMAGE,
-        env_vars={**s3_env_vars, **duckdb_env_vars},
-        arguments=[
-            "--command", "load_data",
-            "--input_file_key", TRANSFORMED_FILE_KEY,
-            "--table_name", STAGING_TABLE_NAME,
-            "--schema_name", f"{DATABASE_NAME}.{STAGING_SCHEMA}",
+            "--products_output_file_key", PRODUCTS_FILE_KEY,
+            "--ingredients_output_file_key", INGREDIENTS_FILE_KEY,
+            "--product_ingredients_output_file_key", PRODUCT_INGREDIENTS_FILE_KEY,
         ],
     )
 
@@ -169,7 +155,6 @@ with dag:
         task_id="create-products-table",
         sql=f"""
             DROP TABLE IF EXISTS {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME};
-
             CREATE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME} (
                 code VARCHAR PRIMARY KEY,
                 product_name VARCHAR,
@@ -183,6 +168,7 @@ with dag:
                 front_url VARCHAR,
                 ingredients_url VARCHAR,
                 nutrition_url VARCHAR,
+                packaging_url VARCHAR,
                 energy_kcal_100g DOUBLE,
                 fat_100g DOUBLE,
                 saturated_fat_100g DOUBLE,
@@ -198,37 +184,6 @@ with dag:
                 iron_100g DOUBLE,
                 potassium_100g DOUBLE
             );
-
-            INSERT INTO {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME}
-            SELECT
-                code,
-                product_name,
-                brands,
-                quantity,
-                serving_size,
-                ecoscore_score,
-                ecoscore_grade,
-                nutriscore_score,
-                nutriscore_grade,
-                front_url,
-                ingredients_url,
-                nutrition_url,
-                energy_kcal_100g,
-                fat_100g,
-                saturated_fat_100g,
-                trans_fat_100g,
-                cholesterol_100g,
-                sodium_100g,
-                salt_100g,
-                carbohydrates_100g,
-                fiber_100g,
-                sugars_100g,
-                proteins_100g,
-                calcium_100g,
-                iron_100g,
-                potassium_100g
-            FROM {DATABASE_NAME}.{STAGING_SCHEMA}.{STAGING_TABLE_NAME}
-            WHERE code IS NOT NULL;
         """,
         duckdb_conn_id="duckdb_default",
     )
@@ -238,147 +193,11 @@ with dag:
         task_id="create-ingredients-table",
         sql=f"""
             DROP TABLE IF EXISTS {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME};
-
             CREATE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME} (
                 ingredient_id VARCHAR PRIMARY KEY,
-                ingredient_name VARCHAR NOT NULL,
-                is_in_taxonomy INTEGER,
-                vegan VARCHAR,
-                vegetarian VARCHAR,
-                from_palm_oil VARCHAR,
-                processing VARCHAR,
-                labels VARCHAR,
-                is_compound_ingredient INTEGER,
-                is_probable_noise INTEGER
+                ingredient_text VARCHAR,
+                ingredient_name VARCHAR NOT NULL
             );
-
-            INSERT INTO {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME}
-            WITH RECURSIVE ingredient_nodes AS (
-                SELECT
-                    s.code,
-                    CAST(je.key AS INTEGER) + 1 AS ingredient_order,
-                    0 AS ingredient_level,
-                    CAST(NULL AS VARCHAR) AS parent_ingredient_id,
-                    je.value AS ingredient_json
-                FROM {DATABASE_NAME}.{STAGING_SCHEMA}.{STAGING_TABLE_NAME} s,
-                     json_each(CAST(s.ingredients AS JSON)) je
-                WHERE s.code IS NOT NULL
-                  AND s.ingredients IS NOT NULL
-
-                UNION ALL
-
-                SELECT
-                    n.code,
-                    CAST(child.key AS INTEGER) + 1 AS ingredient_order,
-                    n.ingredient_level + 1 AS ingredient_level,
-                    json_extract_string(n.ingredient_json, '$.id') AS parent_ingredient_id,
-                    child.value AS ingredient_json
-                FROM ingredient_nodes n,
-                     json_each(json_extract(n.ingredient_json, '$.ingredients')) child
-                WHERE json_extract(n.ingredient_json, '$.ingredients') IS NOT NULL
-            ),
-            extracted AS (
-                SELECT
-                    json_extract_string(ingredient_json, '$.id') AS ingredient_id,
-                    json_extract_string(ingredient_json, '$.text') AS ingredient_text_raw,
-                    TRY_CAST(json_extract_string(ingredient_json, '$.is_in_taxonomy') AS INTEGER) AS is_in_taxonomy,
-                    json_extract_string(ingredient_json, '$.vegan') AS vegan,
-                    json_extract_string(ingredient_json, '$.vegetarian') AS vegetarian,
-                    json_extract_string(ingredient_json, '$.from_palm_oil') AS from_palm_oil,
-                    json_extract_string(ingredient_json, '$.processing') AS processing,
-                    json_extract_string(ingredient_json, '$.labels') AS labels,
-                    CASE
-                        WHEN json_extract(ingredient_json, '$.ingredients') IS NOT NULL
-                             AND json_array_length(json_extract(ingredient_json, '$.ingredients')) > 0
-                        THEN 1 ELSE 0
-                    END AS is_compound_ingredient
-                FROM ingredient_nodes
-                WHERE json_extract_string(ingredient_json, '$.id') IS NOT NULL
-            ),
-            normalized AS (
-                SELECT
-                    ingredient_id,
-                    lower(
-                        trim(
-                            regexp_replace(
-                                regexp_replace(
-                                    regexp_replace(
-                                        regexp_replace(
-                                            coalesce(
-                                                regexp_replace(ingredient_id, '^[a-z]{{2}}:', ''),
-                                                ingredient_text_raw
-                                            ),
-                                            '[_"]',
-                                            ' '
-                                        ),
-                                        '[-/]',
-                                        ' '
-                                    ),
-                                    '\\s+',
-                                    ' '
-                                ),
-                                '[^a-zA-Z0-9 %]+',
-                                ''
-                            )
-                        )
-                    ) AS ingredient_name,
-                    is_in_taxonomy,
-                    vegan,
-                    vegetarian,
-                    from_palm_oil,
-                    processing,
-                    labels,
-                    is_compound_ingredient
-                FROM extracted
-            ),
-            dedup AS (
-                SELECT
-                    ingredient_id,
-                    ANY_VALUE(ingredient_name) AS ingredient_name,
-                    ANY_VALUE(is_in_taxonomy) AS is_in_taxonomy,
-                    ANY_VALUE(vegan) AS vegan,
-                    ANY_VALUE(vegetarian) AS vegetarian,
-                    ANY_VALUE(from_palm_oil) AS from_palm_oil,
-                    ANY_VALUE(processing) AS processing,
-                    ANY_VALUE(labels) AS labels,
-                    MAX(is_compound_ingredient) AS is_compound_ingredient,
-                    MAX(
-                        CASE
-                            WHEN ingredient_name IS NULL OR trim(ingredient_name) = '' THEN 1
-                            WHEN ingredient_name LIKE '%contains less than%' THEN 1
-                            WHEN ingredient_name LIKE '%may contain%' THEN 1
-                            WHEN ingredient_name LIKE '%manufactured in%' THEN 1
-                            WHEN ingredient_name LIKE '%facility that also processes%' THEN 1
-                            WHEN ingredient_name LIKE '%daily value%' THEN 1
-                            WHEN ingredient_name LIKE '%polyunsaturated fat%' THEN 1
-                            WHEN ingredient_name LIKE '%monounsaturated fat%' THEN 1
-                            WHEN ingredient_name LIKE '%cholesterol%' THEN 1
-                            WHEN ingredient_name LIKE '%sodium%' THEN 1
-                            WHEN ingredient_name LIKE '%total carbohydrate%' THEN 1
-                            WHEN ingredient_name LIKE '%dietary fiber%' THEN 1
-                            WHEN ingredient_name LIKE '%total sugars%' THEN 1
-                            WHEN ingredient_name LIKE '%vitamin d%' THEN 1
-                            WHEN ingredient_name LIKE '%potassium%' THEN 1
-                            WHEN length(ingredient_name) > 120 THEN 1
-                            ELSE 0
-                        END
-                    ) AS is_probable_noise
-                FROM normalized
-                WHERE ingredient_id IS NOT NULL
-                GROUP BY ingredient_id
-            )
-            SELECT
-                ingredient_id,
-                ingredient_name,
-                is_in_taxonomy,
-                vegan,
-                vegetarian,
-                from_palm_oil,
-                processing,
-                labels,
-                is_compound_ingredient,
-                is_probable_noise
-            FROM dedup;
         """,
         duckdb_conn_id="duckdb_default",
     )
@@ -388,7 +207,6 @@ with dag:
         task_id="create-product-ingredients-table",
         sql=f"""
             DROP TABLE IF EXISTS {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME};
-
             CREATE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME} (
                 code VARCHAR,
                 ingredient_id VARCHAR,
@@ -401,77 +219,50 @@ with dag:
                 percent_estimate DOUBLE,
                 PRIMARY KEY (code, ingredient_id, ingredient_order, ingredient_level)
             );
-
-            INSERT INTO {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME}
-            WITH RECURSIVE ingredient_nodes AS (
-                SELECT
-                    s.code,
-                    CAST(je.key AS INTEGER) + 1 AS ingredient_order,
-                    0 AS ingredient_level,
-                    CAST(NULL AS VARCHAR) AS parent_ingredient_id,
-                    je.value AS ingredient_json
-                FROM {DATABASE_NAME}.{STAGING_SCHEMA}.{STAGING_TABLE_NAME} s,
-                     json_each(CAST(s.ingredients AS JSON)) je
-                WHERE s.code IS NOT NULL
-                  AND s.ingredients IS NOT NULL
-
-                UNION ALL
-
-                SELECT
-                    n.code,
-                    CAST(child.key AS INTEGER) + 1 AS ingredient_order,
-                    n.ingredient_level + 1 AS ingredient_level,
-                    json_extract_string(n.ingredient_json, '$.id') AS parent_ingredient_id,
-                    child.value AS ingredient_json
-                FROM ingredient_nodes n,
-                     json_each(json_extract(n.ingredient_json, '$.ingredients')) child
-                WHERE json_extract(n.ingredient_json, '$.ingredients') IS NOT NULL
-            ),
-            extracted AS (
-                SELECT
-                    code,
-                    json_extract_string(ingredient_json, '$.id') AS ingredient_id,
-                    ingredient_order,
-                    ingredient_level,
-                    parent_ingredient_id,
-                    TRY_CAST(json_extract_string(ingredient_json, '$.percent') AS DOUBLE) AS percent,
-                    TRY_CAST(json_extract_string(ingredient_json, '$.percent_min') AS DOUBLE) AS percent_min,
-                    TRY_CAST(json_extract_string(ingredient_json, '$.percent_max') AS DOUBLE) AS percent_max,
-                    TRY_CAST(json_extract_string(ingredient_json, '$.percent_estimate') AS DOUBLE) AS percent_estimate
-                FROM ingredient_nodes
-                WHERE json_extract_string(ingredient_json, '$.id') IS NOT NULL
-            ),
-            dedup AS (
-                SELECT
-                    code,
-                    ingredient_id,
-                    ingredient_order,
-                    ingredient_level,
-                    ANY_VALUE(parent_ingredient_id) AS parent_ingredient_id,
-                    ANY_VALUE(percent) AS percent,
-                    ANY_VALUE(percent_min) AS percent_min,
-                    ANY_VALUE(percent_max) AS percent_max,
-                    ANY_VALUE(percent_estimate) AS percent_estimate
-                FROM extracted
-                GROUP BY
-                    code,
-                    ingredient_id,
-                    ingredient_order,
-                    ingredient_level
-            )
-            SELECT
-                code,
-                ingredient_id,
-                ingredient_order,
-                ingredient_level,
-                parent_ingredient_id,
-                percent,
-                percent_min,
-                percent_max,
-                percent_estimate
-            FROM dedup;
         """,
         duckdb_conn_id="duckdb_default",
+    )
+
+    load_products = CustomKubernetesPodOperator(
+        dag=dag,
+        task_id="load-products",
+        name="load-products",
+        image=IMAGE,
+        env_vars={**s3_env_vars, **duckdb_env_vars},
+        arguments=[
+            "--command", "load_data",
+            "--input_file_key", PRODUCTS_FILE_KEY,
+            "--table_name", PRODUCTS_TABLE_NAME,
+            "--schema_name", f"{DATABASE_NAME}.{STAGING_SCHEMA}",
+        ],
+    )
+
+    load_ingredients = CustomKubernetesPodOperator(
+        dag=dag,
+        task_id="load-ingredients",
+        name="load-ingredients",
+        image=IMAGE,
+        env_vars={**s3_env_vars, **duckdb_env_vars},
+        arguments=[
+            "--command", "load_data",
+            "--input_file_key", INGREDIENTS_FILE_KEY,
+            "--table_name", INGREDIENTS_TABLE_NAME,
+            "--schema_name", f"{DATABASE_NAME}.{STAGING_SCHEMA}",
+        ],
+    )
+
+    load_product_ingredients = CustomKubernetesPodOperator(
+        dag=dag,
+        task_id="load-product-ingredients",
+        name="load-product-ingredients",
+        image=IMAGE,
+        env_vars={**s3_env_vars, **duckdb_env_vars},
+        arguments=[
+            "--command", "load_data",
+            "--input_file_key", PRODUCT_INGREDIENTS_FILE_KEY,
+            "--table_name", PRODUCT_INGREDIENTS_TABLE_NAME,
+            "--schema_name", f"{DATABASE_NAME}.{STAGING_SCHEMA}",
+        ],
     )
 
     load_rejected = CustomKubernetesPodOperator(
@@ -490,11 +281,11 @@ with dag:
 
     end = EmptyOperator(task_id="end")
 
-    start >> create_schemas >> extract_data >> filter_data >> load_bronze >> validate_data >> transform_data >> load_silver
+    start >> create_schemas >> extract_data >> filter_data >> load_bronze >> validate_data >> transform_data
 
-    load_silver >> create_products_table
-    load_silver >> create_ingredients_table
-    [create_products_table, create_ingredients_table] >> create_product_ingredients_table
-    load_silver >> load_rejected
+    transform_data >> create_products_table >> load_products
+    transform_data >> create_ingredients_table >> load_ingredients
+    transform_data >> create_product_ingredients_table >> load_product_ingredients
+    validate_data >> load_rejected
 
-    [create_product_ingredients_table, load_rejected] >> end
+    [load_products, load_ingredients, load_product_ingredients, load_rejected] >> end
