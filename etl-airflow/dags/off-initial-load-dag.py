@@ -60,10 +60,24 @@ INGREDIENTS_FILE_KEY = f"{DAG_ID}/ingredients.parquet"
 PRODUCT_INGREDIENTS_FILE_KEY = f"{DAG_ID}/product_ingredients.parquet"
 
 FILTER_COLUMNS = ",".join([
-    "code", "brands", "product_name", "product_quantity", "product_quantity_unit",
-    "quantity", "serving_quantity", "serving_size", "categories_tags", "countries_tags",
-    "ecoscore_score", "ecoscore_grade", "images", "ingredients_n", "ingredients",
-    "nutriscore_score", "nutriscore_grade", "nutriments",
+    "code",
+    "brands",
+    "product_name",
+    "product_quantity",
+    "product_quantity_unit",
+    "quantity",
+    "serving_quantity",
+    "serving_size",
+    "categories_tags",
+    "countries_tags",
+    "ecoscore_score",
+    "ecoscore_grade",
+    "images",
+    "ingredients_n",
+    "ingredients",
+    "nutriscore_score",
+    "nutriscore_grade",
+    "nutriments",
 ])
 
 with dag:
@@ -150,79 +164,6 @@ with dag:
         ],
     )
 
-    create_products_table = DuckDBOperator(
-        dag=dag,
-        task_id="create-products-table",
-        sql=f"""
-            DROP TABLE IF EXISTS {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME};
-            CREATE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCTS_TABLE_NAME} (
-                code VARCHAR PRIMARY KEY,
-                product_name VARCHAR,
-                brands VARCHAR,
-                quantity VARCHAR,
-                serving_size VARCHAR,
-                ecoscore_score DOUBLE,
-                ecoscore_grade VARCHAR,
-                nutriscore_score DOUBLE,
-                nutriscore_grade VARCHAR,
-                front_url VARCHAR,
-                ingredients_url VARCHAR,
-                nutrition_url VARCHAR,
-                packaging_url VARCHAR,
-                energy_kcal_100g DOUBLE,
-                fat_100g DOUBLE,
-                saturated_fat_100g DOUBLE,
-                trans_fat_100g DOUBLE,
-                cholesterol_100g DOUBLE,
-                sodium_100g DOUBLE,
-                salt_100g DOUBLE,
-                carbohydrates_100g DOUBLE,
-                fiber_100g DOUBLE,
-                sugars_100g DOUBLE,
-                proteins_100g DOUBLE,
-                calcium_100g DOUBLE,
-                iron_100g DOUBLE,
-                potassium_100g DOUBLE
-            );
-        """,
-        duckdb_conn_id="duckdb_default",
-    )
-
-    create_ingredients_table = DuckDBOperator(
-        dag=dag,
-        task_id="create-ingredients-table",
-        sql=f"""
-            DROP TABLE IF EXISTS {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME};
-            CREATE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{INGREDIENTS_TABLE_NAME} (
-                ingredient_id VARCHAR PRIMARY KEY,
-                ingredient_text VARCHAR,
-                ingredient_name VARCHAR NOT NULL
-            );
-        """,
-        duckdb_conn_id="duckdb_default",
-    )
-
-    create_product_ingredients_table = DuckDBOperator(
-        dag=dag,
-        task_id="create-product-ingredients-table",
-        sql=f"""
-            DROP TABLE IF EXISTS {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME};
-            CREATE TABLE {DATABASE_NAME}.{STAGING_SCHEMA}.{PRODUCT_INGREDIENTS_TABLE_NAME} (
-                code VARCHAR,
-                ingredient_id VARCHAR,
-                ingredient_order INTEGER,
-                ingredient_level INTEGER,
-                parent_ingredient_id VARCHAR,
-                percent DOUBLE,
-                percent_min DOUBLE,
-                percent_max DOUBLE,
-                percent_estimate DOUBLE,
-                PRIMARY KEY (code, ingredient_id, ingredient_order, ingredient_level)
-            );
-        """,
-        duckdb_conn_id="duckdb_default",
-    )
-
     load_products = CustomKubernetesPodOperator(
         dag=dag,
         task_id="load-products",
@@ -281,11 +222,13 @@ with dag:
 
     end = EmptyOperator(task_id="end")
 
-    start >> create_schemas >> extract_data >> filter_data >> load_bronze >> validate_data >> transform_data
+    start >> create_schemas >> extract_data >> filter_data >> load_bronze >> validate_data
 
-    transform_data >> create_products_table >> load_products
-    transform_data >> create_ingredients_table >> load_ingredients
-    transform_data >> create_product_ingredients_table >> load_product_ingredients
+    validate_data >> transform_data
     validate_data >> load_rejected
+
+    transform_data >> load_products
+    transform_data >> load_ingredients
+    transform_data >> load_product_ingredients
 
     [load_products, load_ingredients, load_product_ingredients, load_rejected] >> end
