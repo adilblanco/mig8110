@@ -3,7 +3,9 @@ import re
 import json
 import logging
 import unicodedata
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.request import urlopen
 
 import pandas as pd
 
@@ -12,6 +14,9 @@ from common.s3 import S3FileHandler
 logger = logging.getLogger(__name__)
 
 BASE_IMAGE_URL = "https://images.openfoodfacts.org/images/products"
+OFF_INGREDIENTS_TAXONOMY_URL = (
+    "https://raw.githubusercontent.com/openfoodfacts/openfoodfacts-server/main/taxonomies/food/ingredients.txt"
+)
 
 NUTRIMENTS = [
     ("energy-kcal", "energy_kcal_100g"),
@@ -85,47 +90,28 @@ PRODUCT_INGREDIENT_COLUMNS = [
     "percent_estimate",
 ]
 
-STOPWORDS_EN = [
-    "contains less than 2% of the following",
-    "contains one or more of the following",
-    "may contain one or more of the following",
-    "less than 1% of",
-    "manufactured in a facility that also processes",
-    "manufactiured in a facility that also processes",
-    "added to enhance freshness",
-    "added to maintain flavor and freshness",
-    "in varying proportions",
-    "produced with",
-    "for freshness",
-    "with added",
-    "contains",
-    "contain",
-    "including",
-    "minimum",
-    "based",
-    "edible",
-    "substances",
-    "with",
-    "from",
-    "and",
-    "or",
+# bruit métier / phrases parasites
+NOISE_PATTERNS = [
+    r"^contains less than \d+",
+    r"^may contain",
+    r"^manufactured in a facility",
+    r"^manufactiured in a facility",
+    r"^trans fat \d",
+    r"^tells ou ho in a serving",
+    r"^and milk$",
+    r"^dv$",
+    r"^veg$",
 ]
 
-SYNONYM_REPLACEMENTS = {
-    "colourings": "colorings",
-    "colouring": "coloring",
-    "coloured": "colored",
-    "colourful": "colorful",
-    "colour": "color",
-    "fibre": "fiber",
-    "hydrolysed": "hydrolyzed",
-    "pasteurised": "pasteurized",
-    "flavour": "flavor",
-    "flavouring": "flavoring",
-    "soya": "soy",
+NOISE_IDS = {
+    "en:contains-less-than-2-of",
+    "en:manufactiured-in-a-facility-that-also-processes-egg",
+    "en:and-milk",
+    "en:dv",
 }
 
-CANONICAL_MAPPING = {
+# quelques règles locales gardées même avec la taxonomie
+LOCAL_CANONICAL_MAPPING = {
     "soybean": "soy",
     "soy bean": "soy",
     "soybean paste": "soy paste",
@@ -148,7 +134,6 @@ CANONICAL_MAPPING = {
     "palmolein": "palm oil",
     "palm fruit": "palm",
     "canola oil": "canola",
-    "olive oil": "olive oil",
     "cane sugar": "sugar",
     "beet sugar": "sugar",
     "sea salt": "salt",
@@ -158,31 +143,145 @@ CANONICAL_MAPPING = {
     "caramel color": "caramel coloring",
 }
 
-NOISE_PATTERNS = [
-    r"^contains less than \d+",
-    r"^may contain",
-    r"^manufactured in a facility",
-    r"^manufactiured in a facility",
-    r"^trans fat \d",
-    r"^tells ou ho in a serving",
-    r"^and milk$",
-    r"^dv$",
-    r"^veg$",
-]
-
-NOISE_IDS = {
-    "en:contains-less-than-2-of",
-    "en:manufactiured-in-a-facility-that-also-processes-egg",
-    "en:and-milk",
-    "en:dv",
-}
-
 
 def _strip_accents(text: str) -> str:
     return "".join(
         ch for ch in unicodedata.normalize("NFKD", text)
         if not unicodedata.combining(ch)
     )
+
+
+def _normalize_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_for_match(text: str) -> str:
+    text = _strip_accents(text)
+    text = text.replace("_", " ")
+    text = text.replace('"', " ")
+    text = text.replace("“", " ").replace("”", " ")
+    text = text.replace("’", "'").replace("‘", "'")
+    text = text.replace("/", " ")
+    text = text.replace("-", " ")
+    text = re.sub(r"[^a-zA-Z0-9 %]+", " ", text)
+    text = text.lower()
+    return _normalize_spaces(text)
+
+
+@lru_cache(maxsize=1)
+def _load_off_taxonomy() -> Dict[str, Any]:
+    """
+    Charge et parse la taxonomie Open Food Facts.
+    On récupère :
+    - stopwords anglais
+    - synonymes globaux anglais
+    - un alias_map approximatif à partir des lignes en:
+    """
+    logger.info("Downloading Open Food Facts ingredient taxonomy from %s", OFF_INGREDIENTS_TAXONOMY_URL)
+
+    with urlopen(OFF_INGREDIENTS_TAXONOMY_URL, timeout=60) as response:
+        raw_text = response.read().decode("utf-8", errors="replace")
+
+    stopwords_en: List[str] = []
+    global_synonym_map: Dict[str, str] = {}
+    alias_map: Dict[str, str] = {}
+
+    current_en_terms: List[str] = []
+
+    def flush_current_entry() -> None:
+        nonlocal current_en_terms, alias_map
+        if not current_en_terms:
+            return
+
+        normalized_terms = []
+        for term in current_en_terms:
+            nterm = _normalize_for_match(term)
+            if nterm:
+                normalized_terms.append(nterm)
+
+        if not normalized_terms:
+            current_en_terms = []
+            return
+
+        canonical = normalized_terms[0]
+        for term in normalized_terms:
+            alias_map[term] = canonical
+
+        current_en_terms = []
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            flush_current_entry()
+            continue
+
+        if line.startswith("#"):
+            continue
+
+        if line.startswith("stopwords:en:"):
+            payload = line.split("stopwords:en:", 1)[1].strip()
+            words = [w.strip() for w in payload.split(",") if w.strip()]
+            stopwords_en.extend(words)
+            continue
+
+        if line.startswith("synonyms:en:"):
+            payload = line.split("synonyms:en:", 1)[1].strip()
+            synonyms = [s.strip() for s in payload.split(",") if s.strip()]
+            normalized_synonyms = [_normalize_for_match(s) for s in synonyms if _normalize_for_match(s)]
+            if normalized_synonyms:
+                canonical = normalized_synonyms[0]
+                for syn in normalized_synonyms:
+                    global_synonym_map[syn] = canonical
+            continue
+
+        # lignes d'héritage, on les ignore pour ce parseur simplifié
+        if line.startswith("< en:"):
+            continue
+
+        # entrée taxonomique anglaise
+        if line.startswith("en:"):
+            flush_current_entry()
+            payload = line.split("en:", 1)[1].strip()
+            terms = [t.strip() for t in payload.split(",") if t.strip()]
+            current_en_terms = terms
+            continue
+
+    flush_current_entry()
+
+    # quelques synonymes anglais utiles gardés en local
+    local_synonyms = {
+        "colourings": "colorings",
+        "colouring": "coloring",
+        "coloured": "colored",
+        "colourful": "colorful",
+        "colour": "color",
+        "fibre": "fiber",
+        "hydrolysed": "hydrolyzed",
+        "pasteurised": "pasteurized",
+        "flavour": "flavor",
+        "flavouring": "flavoring",
+        "soya": "soy",
+    }
+
+    for src, dst in local_synonyms.items():
+        global_synonym_map[_normalize_for_match(src)] = _normalize_for_match(dst)
+
+    # dédoublonnage + tri stopwords par longueur décroissante
+    stopwords_en = sorted(set(_normalize_for_match(w) for w in stopwords_en if _normalize_for_match(w)), key=len, reverse=True)
+
+    logger.info(
+        "OFF taxonomy loaded: %s english stopwords, %s global synonyms, %s alias entries",
+        len(stopwords_en),
+        len(global_synonym_map),
+        len(alias_map),
+    )
+
+    return {
+        "stopwords_en": stopwords_en,
+        "global_synonym_map": global_synonym_map,
+        "alias_map": alias_map,
+    }
 
 
 def _extract_product_name(product_name_list: Any) -> Optional[str]:
@@ -202,6 +301,37 @@ def _extract_product_name(product_name_list: Any) -> Optional[str]:
 def _build_code_path(code: Any) -> str:
     code_padded = str(code).zfill(13)
     return f"{code_padded[:3]}/{code_padded[3:6]}/{code_padded[6:9]}/{code_padded[9:]}"
+
+
+def _as_list(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, tuple):
+        return list(value)
+
+    try:
+        import numpy as np
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+    except Exception:
+        pass
+
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            return []
+
+    return []
 
 
 def _extract_image_url(images_list: Any, code: Any, image_key: str) -> Optional[str]:
@@ -246,41 +376,6 @@ def _safe_numeric(value: Any) -> Optional[float]:
     return value
 
 
-def _normalize_spaces(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _as_list(value: Any) -> List[Dict[str, Any]]:
-    if value is None:
-        return []
-
-    if isinstance(value, list):
-        return value
-
-    if isinstance(value, tuple):
-        return list(value)
-
-    try:
-        import numpy as np
-        if isinstance(value, np.ndarray):
-            return value.tolist()
-    except Exception:
-        pass
-
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return []
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return parsed
-        except Exception:
-            return []
-
-    return []
-
-
 def _parse_percent(node: Dict[str, Any], key: str) -> Optional[float]:
     value = node.get(key)
     if value is None:
@@ -291,22 +386,15 @@ def _parse_percent(node: Dict[str, Any], key: str) -> Optional[float]:
         return None
 
 
-def _clean_raw_ingredient_text(text: str) -> str:
-    text = _strip_accents(text)
-    text = text.replace("_", " ")
-    text = text.replace('"', " ")
-    text = text.replace("“", " ").replace("”", " ")
-    text = text.replace("’", "'").replace("‘", "'")
-    text = text.replace("/", " ")
-    text = text.replace("-", " ")
-    text = re.sub(r"[^a-zA-Z0-9 %]+", " ", text)
-    return _normalize_spaces(text)
-
-
 def _normalize_ingredient_name(
     ingredient_text: Optional[str],
     ingredient_id: Optional[str],
 ) -> Optional[str]:
+    taxonomy = _load_off_taxonomy()
+    stopwords_en = taxonomy["stopwords_en"]
+    global_synonym_map = taxonomy["global_synonym_map"]
+    alias_map = taxonomy["alias_map"]
+
     raw = None
 
     if isinstance(ingredient_text, str) and ingredient_text.strip():
@@ -317,22 +405,27 @@ def _normalize_ingredient_name(
     if not raw:
         return None
 
-    value = _clean_raw_ingredient_text(raw).lower()
+    value = _normalize_for_match(raw)
 
-    for stopword in sorted(STOPWORDS_EN, key=len, reverse=True):
+    # suppression des stopwords Open Food Facts
+    for stopword in stopwords_en:
         pattern = r"\b" + re.escape(stopword) + r"\b"
         value = re.sub(pattern, " ", value)
 
     value = _normalize_spaces(value)
 
-    for src, dst in SYNONYM_REPLACEMENTS.items():
-        pattern = r"\b" + re.escape(src) + r"\b"
-        value = re.sub(pattern, dst, value)
+    # remplacement de synonymes globaux Open Food Facts
+    tokens = value.split()
+    replaced_tokens = [global_synonym_map.get(tok, tok) for tok in tokens]
+    value = _normalize_spaces(" ".join(replaced_tokens))
 
-    value = _normalize_spaces(value)
+    # synonymes / standardisation multi-mots via alias_map taxonomique
+    if value in alias_map:
+        value = alias_map[value]
 
-    if value in CANONICAL_MAPPING:
-        value = CANONICAL_MAPPING[value]
+    # fallback local pour quelques cas métier utiles
+    if value in LOCAL_CANONICAL_MAPPING:
+        value = LOCAL_CANONICAL_MAPPING[value]
 
     value = _normalize_spaces(value)
 
@@ -526,6 +619,9 @@ def handle(
     s3_secret_key = os.environ["S3_SECRET_KEY"]
 
     logger.info("Transforming data from %s", input_file_key)
+
+    # charge la taxonomie au début pour vérifier rapidement si le téléchargement marche
+    _load_off_taxonomy()
 
     s3_handler = S3FileHandler(
         s3_bucket,
