@@ -1,6 +1,8 @@
 import os
 import re
+import json
 import logging
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -88,21 +90,23 @@ STOPWORDS_EN = [
     "contains one or more of the following",
     "may contain one or more of the following",
     "less than 1% of",
-    "with added",
+    "manufactured in a facility that also processes",
+    "manufactiured in a facility that also processes",
     "added to enhance freshness",
     "added to maintain flavor and freshness",
+    "in varying proportions",
     "produced with",
     "for freshness",
-    "in varying proportions",
+    "with added",
     "contains",
     "contain",
-    "with",
-    "from",
     "including",
     "minimum",
     "based",
     "edible",
     "substances",
+    "with",
+    "from",
     "and",
     "or",
 ]
@@ -116,10 +120,16 @@ SYNONYM_REPLACEMENTS = {
     "fibre": "fiber",
     "hydrolysed": "hydrolyzed",
     "pasteurised": "pasteurized",
+    "flavour": "flavor",
+    "flavouring": "flavoring",
     "soya": "soy",
 }
 
 CANONICAL_MAPPING = {
+    "soybean": "soy",
+    "soy bean": "soy",
+    "soybean paste": "soy paste",
+    "soybean flour": "soy flour",
     "soybean lecithin": "soy lecithin",
     "gmo free soy lecithin": "soy lecithin",
     "non gmo soy lecithin": "soy lecithin",
@@ -136,21 +146,56 @@ CANONICAL_MAPPING = {
     "tetraterpenoids": "carotenoids",
     "caramel sugar syrup": "caramelised sugar syrup",
     "palmolein": "palm oil",
+    "palm fruit": "palm",
+    "canola oil": "canola",
+    "olive oil": "olive oil",
     "cane sugar": "sugar",
     "beet sugar": "sugar",
     "sea salt": "salt",
+    "dried onion": "dehydrated onion",
+    "artificial flavors": "artificial flavoring",
+    "natural flavors": "natural flavoring",
+    "caramel color": "caramel coloring",
 }
+
+NOISE_PATTERNS = [
+    r"^contains less than \d+",
+    r"^may contain",
+    r"^manufactured in a facility",
+    r"^manufactiured in a facility",
+    r"^trans fat \d",
+    r"^tells ou ho in a serving",
+    r"^and milk$",
+    r"^dv$",
+    r"^veg$",
+]
+
+NOISE_IDS = {
+    "en:contains-less-than-2-of",
+    "en:manufactiured-in-a-facility-that-also-processes-egg",
+    "en:and-milk",
+    "en:dv",
+}
+
+
+def _strip_accents(text: str) -> str:
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
 
 
 def _extract_product_name(product_name_list: Any) -> Optional[str]:
     if product_name_list is None:
         return None
+
     try:
         for item in product_name_list:
             if isinstance(item, dict) and item.get("lang") == "main":
                 return item.get("text")
     except TypeError:
         return None
+
     return None
 
 
@@ -160,35 +205,38 @@ def _build_code_path(code: Any) -> str:
 
 
 def _extract_image_url(images_list: Any, code: Any, image_key: str) -> Optional[str]:
-    if images_list is None:
+    images = _as_list(images_list)
+    if not images:
         return None
-    try:
-        for item in images_list:
-            if isinstance(item, dict) and item.get("key") == image_key:
-                rev = item.get("rev")
-                if rev is not None:
-                    return (
-                        f"{BASE_IMAGE_URL}/"
-                        f"{_build_code_path(code)}/"
-                        f"{image_key}.{int(rev)}.400.jpg"
-                    )
-    except TypeError:
-        return None
+
+    for item in images:
+        if isinstance(item, dict) and item.get("key") == image_key:
+            rev = item.get("rev")
+            if rev is not None:
+                return (
+                    f"{BASE_IMAGE_URL}/"
+                    f"{_build_code_path(code)}/"
+                    f"{image_key}.{int(rev)}.400.jpg"
+                )
+
     return None
 
 
 def _extract_nutriment(nutriments_list: Any, nutriment_name: str) -> Optional[float]:
-    if nutriments_list is None:
+    nutriments = _as_list(nutriments_list)
+    if not nutriments:
         return None
-    try:
-        for item in nutriments_list:
-            if isinstance(item, dict) and item.get("name") == nutriment_name:
-                value = item.get("100g")
-                if value is None:
-                    return None
+
+    for item in nutriments:
+        if isinstance(item, dict) and item.get("name") == nutriment_name:
+            value = item.get("100g")
+            if value is None:
+                return None
+            try:
                 return round(float(value), 2)
-    except (TypeError, ValueError):
-        return None
+            except (TypeError, ValueError):
+                return None
+
     return None
 
 
@@ -202,19 +250,74 @@ def _normalize_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _normalize_ingredient_name(ingredient_text: Optional[str], ingredient_id: Optional[str]) -> Optional[str]:
-    raw = ingredient_text.strip() if isinstance(ingredient_text, str) and ingredient_text.strip() else None
-    if not raw and ingredient_id:
+def _as_list(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, tuple):
+        return list(value)
+
+    try:
+        import numpy as np
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+    except Exception:
+        pass
+
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            return []
+
+    return []
+
+
+def _parse_percent(node: Dict[str, Any], key: str) -> Optional[float]:
+    value = node.get(key)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clean_raw_ingredient_text(text: str) -> str:
+    text = _strip_accents(text)
+    text = text.replace("_", " ")
+    text = text.replace('"', " ")
+    text = text.replace("“", " ").replace("”", " ")
+    text = text.replace("’", "'").replace("‘", "'")
+    text = text.replace("/", " ")
+    text = text.replace("-", " ")
+    text = re.sub(r"[^a-zA-Z0-9 %]+", " ", text)
+    return _normalize_spaces(text)
+
+
+def _normalize_ingredient_name(
+    ingredient_text: Optional[str],
+    ingredient_id: Optional[str],
+) -> Optional[str]:
+    raw = None
+
+    if isinstance(ingredient_text, str) and ingredient_text.strip():
+        raw = ingredient_text.strip()
+    elif ingredient_id:
         raw = re.sub(r"^[a-z]{2}:", "", str(ingredient_id).strip())
 
     if not raw:
         return None
 
-    value = raw.lower()
-    value = value.replace("_", " ").replace('"', " ")
-    value = value.replace("-", " ").replace("/", " ")
-    value = re.sub(r"[^a-zA-Z0-9 %]+", " ", value)
-    value = _normalize_spaces(value)
+    value = _clean_raw_ingredient_text(raw).lower()
 
     for stopword in sorted(STOPWORDS_EN, key=len, reverse=True):
         pattern = r"\b" + re.escape(stopword) + r"\b"
@@ -227,23 +330,30 @@ def _normalize_ingredient_name(ingredient_text: Optional[str], ingredient_id: Op
         value = re.sub(pattern, dst, value)
 
     value = _normalize_spaces(value)
-    value = CANONICAL_MAPPING.get(value, value)
+
+    if value in CANONICAL_MAPPING:
+        value = CANONICAL_MAPPING[value]
+
+    value = _normalize_spaces(value)
 
     return value or None
 
 
-def _as_list(value: Any) -> List[Dict[str, Any]]:
-    return value if isinstance(value, list) else []
+def _is_probable_noise(ingredient_id: Optional[str], ingredient_name: Optional[str]) -> bool:
+    if ingredient_id in NOISE_IDS:
+        return True
 
+    if not ingredient_name:
+        return True
 
-def _parse_percent(node: Dict[str, Any], key: str) -> Optional[float]:
-    value = node.get(key)
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    if len(ingredient_name) > 120:
+        return True
+
+    for pattern in NOISE_PATTERNS:
+        if re.search(pattern, ingredient_name):
+            return True
+
+    return False
 
 
 def _extract_ingredient_nodes(
@@ -264,12 +374,14 @@ def _extract_ingredient_nodes(
         if ingredient_id is None:
             continue
 
+        normalized_name = _normalize_ingredient_name(ingredient_text, ingredient_id)
+
         rows.append(
             {
-                "code": product_code,
+                "code": str(product_code) if product_code is not None else None,
                 "ingredient_id": ingredient_id,
                 "ingredient_text": ingredient_text,
-                "ingredient_name": _normalize_ingredient_name(ingredient_text, ingredient_id),
+                "ingredient_name": normalized_name,
                 "ingredient_order": idx,
                 "ingredient_level": level,
                 "parent_ingredient_id": parent_ingredient_id,
@@ -294,6 +406,7 @@ def _extract_ingredient_nodes(
 def _prepare_products(df: pd.DataFrame) -> pd.DataFrame:
     products_df = df.copy()
 
+    products_df["code"] = products_df["code"].astype(str)
     products_df["product_name"] = products_df["product_name"].apply(_extract_product_name)
 
     for image_key, col_name in IMAGE_KEYS:
@@ -331,12 +444,27 @@ def _prepare_products(df: pd.DataFrame) -> pd.DataFrame:
 def _prepare_ingredients_and_links(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     ingredient_rows: List[Dict[str, Any]] = []
 
-    for _, row in df.iterrows():
-        ingredient_rows.extend(_extract_ingredient_nodes(row["code"], row.get("ingredients")))
+    for idx, row in df.iterrows():
+        ingredients_value = row.get("ingredients")
+        parsed_ingredients = _as_list(ingredients_value)
+
+        if idx < 5:
+            logger.info(
+                "Row %s - code=%s - ingredients raw type=%s - parsed_len=%s",
+                idx,
+                row.get("code"),
+                type(ingredients_value).__name__,
+                len(parsed_ingredients),
+            )
+
+        ingredient_rows.extend(_extract_ingredient_nodes(row["code"], ingredients_value))
+
+    logger.info("Total extracted ingredient rows before DataFrame: %s", len(ingredient_rows))
 
     links_df = pd.DataFrame(ingredient_rows)
 
     if links_df.empty:
+        logger.warning("No ingredient rows extracted. ingredients_df and product_ingredients_df will be empty.")
         ingredients_df = pd.DataFrame(columns=INGREDIENT_COLUMNS)
         product_ingredients_df = pd.DataFrame(columns=PRODUCT_INGREDIENT_COLUMNS)
         return ingredients_df, product_ingredients_df
@@ -346,21 +474,25 @@ def _prepare_ingredients_and_links(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
         axis=1,
     )
 
+    links_df["is_noise"] = links_df.apply(
+        lambda r: _is_probable_noise(r.get("ingredient_id"), r.get("ingredient_name")),
+        axis=1,
+    )
+
     links_df = links_df[links_df["ingredient_id"].notna()].copy()
     links_df = links_df[links_df["ingredient_name"].notna()].copy()
+    links_df = links_df[~links_df["is_noise"]].copy()
 
     ingredients_df = (
         links_df[["ingredient_id", "ingredient_text", "ingredient_name"]]
-        .sort_values(["ingredient_id"])
+        .sort_values(["ingredient_id", "ingredient_name"])
         .drop_duplicates(subset=["ingredient_id"], keep="first")
         .reset_index(drop=True)
     )
 
     product_ingredients_df = (
         links_df[PRODUCT_INGREDIENT_COLUMNS]
-        .drop_duplicates(
-            subset=["code", "ingredient_id", "ingredient_order", "ingredient_level"]
-        )
+        .drop_duplicates(subset=["code", "ingredient_id", "ingredient_order", "ingredient_level"])
         .reset_index(drop=True)
     )
 
@@ -389,6 +521,10 @@ def handle(
 
     parquet_bytes = s3_handler.download_to_memory(input_file_key)
     df = pd.read_parquet(parquet_bytes)
+
+    logger.info("Input rows: %s", len(df))
+    if "ingredients" in df.columns and not df.empty:
+        logger.info("Sample ingredients type: %s", type(df['ingredients'].iloc[0]).__name__)
 
     products_df = _prepare_products(df)
     ingredients_df, product_ingredients_df = _prepare_ingredients_and_links(df)
