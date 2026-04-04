@@ -5,7 +5,6 @@ import logging
 import unicodedata
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.request import urlopen
 
 import pandas as pd
 
@@ -14,8 +13,9 @@ from common.s3 import S3FileHandler
 logger = logging.getLogger(__name__)
 
 BASE_IMAGE_URL = "https://images.openfoodfacts.org/images/products"
-OFF_INGREDIENTS_TAXONOMY_URL = (
-    "https://raw.githubusercontent.com/openfoodfacts/openfoodfacts-server/main/taxonomies/food/ingredients.txt"
+OFF_INGREDIENTS_TAXONOMY_PATH = os.environ.get(
+    "OFF_INGREDIENTS_TAXONOMY_PATH",
+    "/app/resources/ingredients.txt",
 )
 
 NUTRIMENTS = [
@@ -76,6 +76,10 @@ INGREDIENT_COLUMNS = [
     "ingredient_id",
     "ingredient_text",
     "ingredient_name",
+    "is_in_taxonomy",
+    "vegan",
+    "vegetarian",
+    "from_palm_oil",
 ]
 
 PRODUCT_INGREDIENT_COLUMNS = [
@@ -171,16 +175,24 @@ def _normalize_for_match(text: str) -> str:
 @lru_cache(maxsize=1)
 def _load_off_taxonomy() -> Dict[str, Any]:
     """
-    Charge et parse la taxonomie Open Food Facts.
+    Charge et parse la taxonomie Open Food Facts depuis un fichier local.
     On récupère :
     - stopwords anglais
     - synonymes globaux anglais
     - un alias_map approximatif à partir des lignes en:
     """
-    logger.info("Downloading Open Food Facts ingredient taxonomy from %s", OFF_INGREDIENTS_TAXONOMY_URL)
+    logger.info(
+        "Loading local Open Food Facts ingredient taxonomy from %s",
+        OFF_INGREDIENTS_TAXONOMY_PATH,
+    )
 
-    with urlopen(OFF_INGREDIENTS_TAXONOMY_URL, timeout=60) as response:
-        raw_text = response.read().decode("utf-8", errors="replace")
+    if not os.path.exists(OFF_INGREDIENTS_TAXONOMY_PATH):
+        raise FileNotFoundError(
+            f"Taxonomy file not found: {OFF_INGREDIENTS_TAXONOMY_PATH}"
+        )
+
+    with open(OFF_INGREDIENTS_TAXONOMY_PATH, "r", encoding="utf-8") as f:
+        raw_text = f.read()
 
     stopwords_en: List[str] = []
     global_synonym_map: Dict[str, str] = {}
@@ -228,18 +240,20 @@ def _load_off_taxonomy() -> Dict[str, Any]:
         if line.startswith("synonyms:en:"):
             payload = line.split("synonyms:en:", 1)[1].strip()
             synonyms = [s.strip() for s in payload.split(",") if s.strip()]
-            normalized_synonyms = [_normalize_for_match(s) for s in synonyms if _normalize_for_match(s)]
+            normalized_synonyms = [
+                _normalize_for_match(s)
+                for s in synonyms
+                if _normalize_for_match(s)
+            ]
             if normalized_synonyms:
                 canonical = normalized_synonyms[0]
                 for syn in normalized_synonyms:
                     global_synonym_map[syn] = canonical
             continue
 
-        # lignes d'héritage, on les ignore pour ce parseur simplifié
         if line.startswith("< en:"):
             continue
 
-        # entrée taxonomique anglaise
         if line.startswith("en:"):
             flush_current_entry()
             payload = line.split("en:", 1)[1].strip()
@@ -249,7 +263,6 @@ def _load_off_taxonomy() -> Dict[str, Any]:
 
     flush_current_entry()
 
-    # quelques synonymes anglais utiles gardés en local
     local_synonyms = {
         "colourings": "colorings",
         "colouring": "coloring",
@@ -267,11 +280,18 @@ def _load_off_taxonomy() -> Dict[str, Any]:
     for src, dst in local_synonyms.items():
         global_synonym_map[_normalize_for_match(src)] = _normalize_for_match(dst)
 
-    # dédoublonnage + tri stopwords par longueur décroissante
-    stopwords_en = sorted(set(_normalize_for_match(w) for w in stopwords_en if _normalize_for_match(w)), key=len, reverse=True)
+    stopwords_en = sorted(
+        set(
+            _normalize_for_match(w)
+            for w in stopwords_en
+            if _normalize_for_match(w)
+        ),
+        key=len,
+        reverse=True,
+    )
 
     logger.info(
-        "OFF taxonomy loaded: %s english stopwords, %s global synonyms, %s alias entries",
+        "Local OFF taxonomy loaded: %s english stopwords, %s global synonyms, %s alias entries",
         len(stopwords_en),
         len(global_synonym_map),
         len(alias_map),
@@ -315,6 +335,7 @@ def _as_list(value: Any) -> List[Dict[str, Any]]:
 
     try:
         import numpy as np
+
         if isinstance(value, np.ndarray):
             return value.tolist()
     except Exception:
@@ -334,7 +355,11 @@ def _as_list(value: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _extract_image_url(images_list: Any, code: Any, image_key: str) -> Optional[str]:
+def _extract_image_url(
+    images_list: Any,
+    code: Any,
+    image_key: str,
+) -> Optional[str]:
     images = _as_list(images_list)
     if not images:
         return None
@@ -352,7 +377,10 @@ def _extract_image_url(images_list: Any, code: Any, image_key: str) -> Optional[
     return None
 
 
-def _extract_nutriment(nutriments_list: Any, nutriment_name: str) -> Optional[float]:
+def _extract_nutriment(
+    nutriments_list: Any,
+    nutriment_name: str,
+) -> Optional[float]:
     nutriments = _as_list(nutriments_list)
     if not nutriments:
         return None
@@ -407,23 +435,19 @@ def _normalize_ingredient_name(
 
     value = _normalize_for_match(raw)
 
-    # suppression des stopwords Open Food Facts
     for stopword in stopwords_en:
         pattern = r"\b" + re.escape(stopword) + r"\b"
         value = re.sub(pattern, " ", value)
 
     value = _normalize_spaces(value)
 
-    # remplacement de synonymes globaux Open Food Facts
     tokens = value.split()
     replaced_tokens = [global_synonym_map.get(tok, tok) for tok in tokens]
     value = _normalize_spaces(" ".join(replaced_tokens))
 
-    # synonymes / standardisation multi-mots via alias_map taxonomique
     if value in alias_map:
         value = alias_map[value]
 
-    # fallback local pour quelques cas métier utiles
     if value in LOCAL_CANONICAL_MAPPING:
         value = LOCAL_CANONICAL_MAPPING[value]
 
@@ -432,7 +456,10 @@ def _normalize_ingredient_name(
     return value or None
 
 
-def _is_probable_noise(ingredient_id: Optional[str], ingredient_name: Optional[str]) -> bool:
+def _is_probable_noise(
+    ingredient_id: Optional[str],
+    ingredient_name: Optional[str],
+) -> bool:
     if ingredient_id in NOISE_IDS:
         return True
 
@@ -493,6 +520,10 @@ def _extract_ingredient_nodes(
                 "percent_min": _parse_percent(node, "percent_min"),
                 "percent_max": _parse_percent(node, "percent_max"),
                 "percent_estimate": _parse_percent(node, "percent_estimate"),
+                "is_in_taxonomy": node.get("is_in_taxonomy"),
+                "vegan": node.get("vegan"),
+                "vegetarian": node.get("vegetarian"),
+                "from_palm_oil": node.get("from_palm_oil"),
             }
         )
 
@@ -511,7 +542,9 @@ def _prepare_products(df: pd.DataFrame) -> pd.DataFrame:
     products_df = df.copy()
 
     products_df["code"] = products_df["code"].astype(str)
-    products_df["product_name"] = products_df["product_name"].apply(_extract_product_name)
+    products_df["product_name"] = products_df["product_name"].apply(
+        _extract_product_name
+    )
 
     for image_key, col_name in IMAGE_KEYS:
         products_df[col_name] = [
@@ -524,8 +557,12 @@ def _prepare_products(df: pd.DataFrame) -> pd.DataFrame:
             lambda lst, n=nutriment_name: _extract_nutriment(lst, n)
         )
 
-    products_df["ecoscore_score"] = products_df["ecoscore_score"].apply(_safe_numeric)
-    products_df["nutriscore_score"] = products_df["nutriscore_score"].apply(_safe_numeric)
+    products_df["ecoscore_score"] = products_df["ecoscore_score"].apply(
+        _safe_numeric
+    )
+    products_df["nutriscore_score"] = products_df["nutriscore_score"].apply(
+        _safe_numeric
+    )
 
     products_df["nutriscore_grade"] = products_df["nutriscore_grade"].where(
         products_df["nutriscore_grade"].isin(["a", "b", "c", "d", "e"]),
@@ -545,7 +582,9 @@ def _prepare_products(df: pd.DataFrame) -> pd.DataFrame:
     return products_df
 
 
-def _prepare_ingredients_and_links(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def _prepare_ingredients_and_links(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     ingredient_rows: List[Dict[str, Any]] = []
 
     for idx, row in df.iterrows():
@@ -561,20 +600,30 @@ def _prepare_ingredients_and_links(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
                 len(parsed_ingredients),
             )
 
-        ingredient_rows.extend(_extract_ingredient_nodes(row["code"], ingredients_value))
+        ingredient_rows.extend(
+            _extract_ingredient_nodes(row["code"], ingredients_value)
+        )
 
-    logger.info("Total extracted ingredient rows before DataFrame: %s", len(ingredient_rows))
+    logger.info(
+        "Total extracted ingredient rows before DataFrame: %s",
+        len(ingredient_rows),
+    )
 
     links_df = pd.DataFrame(ingredient_rows)
 
     if links_df.empty:
-        logger.warning("No ingredient rows extracted. ingredients_df and product_ingredients_df will be empty.")
+        logger.warning(
+            "No ingredient rows extracted. ingredients_df and product_ingredients_df will be empty."
+        )
         ingredients_df = pd.DataFrame(columns=INGREDIENT_COLUMNS)
         product_ingredients_df = pd.DataFrame(columns=PRODUCT_INGREDIENT_COLUMNS)
         return ingredients_df, product_ingredients_df
 
     links_df["ingredient_name"] = links_df.apply(
-        lambda r: _normalize_ingredient_name(r.get("ingredient_text"), r.get("ingredient_id")),
+        lambda r: _normalize_ingredient_name(
+            r.get("ingredient_text"),
+            r.get("ingredient_id"),
+        ),
         axis=1,
     )
 
@@ -583,7 +632,10 @@ def _prepare_ingredients_and_links(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
     )
 
     links_df["is_noise"] = links_df.apply(
-        lambda r: _is_probable_noise(r.get("ingredient_id"), r.get("ingredient_name")),
+        lambda r: _is_probable_noise(
+            r.get("ingredient_id"),
+            r.get("ingredient_name"),
+        ),
         axis=1,
     )
 
@@ -592,7 +644,17 @@ def _prepare_ingredients_and_links(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
     links_df = links_df[~links_df["is_noise"]].copy()
 
     ingredients_df = (
-        links_df[["ingredient_id", "ingredient_text", "ingredient_name"]]
+        links_df[
+            [
+                "ingredient_id",
+                "ingredient_text",
+                "ingredient_name",
+                "is_in_taxonomy",
+                "vegan",
+                "vegetarian",
+                "from_palm_oil",
+            ]
+        ]
         .sort_values(["ingredient_id", "ingredient_name"])
         .drop_duplicates(subset=["ingredient_id"], keep="first")
         .reset_index(drop=True)
@@ -600,7 +662,15 @@ def _prepare_ingredients_and_links(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
 
     product_ingredients_df = (
         links_df[PRODUCT_INGREDIENT_COLUMNS]
-        .drop_duplicates(subset=["code", "ingredient_id", "ingredient_order", "ingredient_level"])
+        .drop_duplicates(
+            subset=[
+                "code",
+                "ingredient_id",
+                "ingredient_order",
+                "ingredient_level",
+                "parent_ingredient_id",
+            ]
+        )
         .reset_index(drop=True)
     )
 
@@ -620,7 +690,6 @@ def handle(
 
     logger.info("Transforming data from %s", input_file_key)
 
-    # charge la taxonomie au début pour vérifier rapidement si le téléchargement marche
     _load_off_taxonomy()
 
     s3_handler = S3FileHandler(
@@ -635,7 +704,10 @@ def handle(
 
     logger.info("Input rows: %s", len(df))
     if "ingredients" in df.columns and not df.empty:
-        logger.info("Sample ingredients type: %s", type(df["ingredients"].iloc[0]).__name__)
+        logger.info(
+            "Sample ingredients type: %s",
+            type(df["ingredients"].iloc[0]).__name__,
+        )
 
     products_df = _prepare_products(df)
     ingredients_df, product_ingredients_df = _prepare_ingredients_and_links(df)
@@ -646,8 +718,14 @@ def handle(
 
     s3_handler.upload_dataframe(products_df, products_output_file_key)
     s3_handler.upload_dataframe(ingredients_df, ingredients_output_file_key)
-    s3_handler.upload_dataframe(product_ingredients_df, product_ingredients_output_file_key)
+    s3_handler.upload_dataframe(
+        product_ingredients_df,
+        product_ingredients_output_file_key,
+    )
 
     logger.info("Uploaded products to %s", products_output_file_key)
     logger.info("Uploaded ingredients to %s", ingredients_output_file_key)
-    logger.info("Uploaded product_ingredients to %s", product_ingredients_output_file_key)
+    logger.info(
+        "Uploaded product_ingredients to %s",
+        product_ingredients_output_file_key,
+    )

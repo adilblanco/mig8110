@@ -1,29 +1,32 @@
 FROM python:3.11-slim
 
-# Mettez à jour les paquets et installez les dépendances nécessaires pour pipenv
+# Installation des dépendances système nécessaires
 RUN apt-get update && apt-get install -y \
     gcc \
     libpq-dev \
-    && apt-get clean
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Cette instruction définit le répertoire de travail (working directory) dans lequel les commandes ultérieures seront exécutées. 
-# Cela signifie que lorsque vous exécutez des commandes telles que COPY, RUN, ou CMD, elles s'appliqueront à partir du répertoire "/app" par défaut
+# Répertoire de travail
 WORKDIR /app
 
-# Copiez les fichiers Pipfile et Pipfile.lock dans le conteneur
+# Copie des fichiers de dépendances
 COPY Pipfile Pipfile.lock ./
 
-# Elle spécifie le répertoire racine dans lequel Python cherchera des modules lors de l'exécution de scripts Python. 
+# Python cherchera les modules à partir de /app
 ENV PYTHONPATH="/app"
 
-# Installez pipenv & packages
-RUN pip install pipenv
+# Chemin local de la taxonomie OFF
+ENV OFF_INGREDIENTS_TAXONOMY_PATH="/app/resources/ingredients.txt"
+
+# Installation des dépendances Python
+RUN pip install --no-cache-dir pipenv
 RUN pipenv requirements > requirements.txt
 RUN pipenv requirements --dev > requirements-dev.txt
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiez les scripts dans le conteneur
+# Copie du projet
 COPY . ./
 
-# Commande par défaut à exécuter lors du démarrage du conteneur
-ENTRYPOINT [ "python", "run.py" ]
+# Commande par défaut
+ENTRYPOINT ["python", "run.py"]
