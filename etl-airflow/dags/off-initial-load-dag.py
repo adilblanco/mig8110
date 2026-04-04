@@ -150,19 +150,22 @@ with dag:
     )
 
     transform_data = CustomKubernetesPodOperator(
-        dag=dag,
-        task_id="transform-data",
-        name="transform-data",
-        image=IMAGE,
-        env_vars=s3_env_vars,
-        arguments=[
-            "--command", "transform_data",
-            "--input_file_key", VALID_FILE_KEY,
-            "--products_output_file_key", PRODUCTS_FILE_KEY,
-            "--ingredients_output_file_key", INGREDIENTS_FILE_KEY,
-            "--product_ingredients_output_file_key", PRODUCT_INGREDIENTS_FILE_KEY,
-        ],
-    )
+    dag=dag,
+    task_id="transform-data",
+    name="transform-data",
+    image=IMAGE,
+    env_vars={
+        **s3_env_vars,
+        "OFF_INGREDIENTS_TAXONOMY_PATH": "/app/resources/ingredients.txt",
+    },
+    arguments=[
+        "--command", "transform_data",
+        "--input_file_key", VALID_FILE_KEY,
+        "--products_output_file_key", PRODUCTS_FILE_KEY,
+        "--ingredients_output_file_key", INGREDIENTS_FILE_KEY,
+        "--product_ingredients_output_file_key", PRODUCT_INGREDIENTS_FILE_KEY,
+    ],
+)
 
     load_products = CustomKubernetesPodOperator(
         dag=dag,
