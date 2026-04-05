@@ -16,6 +16,7 @@ TARGET_COLUMNS = [
     'ecoscore_grade',
     'nutriscore_score',
     'nutriscore_grade',
+    'ingredients',   
     'front_url',
     'ingredients_url',
     'nutrition_url',
