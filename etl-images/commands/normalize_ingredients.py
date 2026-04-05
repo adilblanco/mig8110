@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import requests
 import pandas as pd
@@ -42,23 +43,39 @@ def _is_language_code(lang: str) -> bool:
     return lang.isalpha() and 2 <= len(lang) <= 3
 
 
+def _parse_ingredients_value(value):
+    """
+    Convertit la colonne ingredients en liste Python.
+    Gère :
+      - liste déjà parsée
+      - string JSON
+      - null
+    """
+    if _is_null(value):
+        return []
+
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            logger.warning(f"Impossible de parser ingredients: {value[:120]}")
+            return []
+
+    return []
+
+
 # ---------------------------------------------------------------------------
 # 3. Parsing enrichi de la taxonomie OFF
 # ---------------------------------------------------------------------------
 
 def _parse_taxonomy(text: str) -> tuple[dict, dict]:
-    """
-    Retourne :
-      1. canonical_map: alias -> ingredient_id canonique
-      2. ingredient_props: ingredient_id -> propriétés OFF
-
-    ingredient_props contient :
-      - ingredient_name
-      - is_in_taxonomy
-      - vegan
-      - vegetarian
-      - from_palm_oil
-    """
     canonical_map: dict[str, str] = {}
     ingredient_props: dict[str, dict] = {}
 
@@ -72,7 +89,6 @@ def _parse_taxonomy(text: str) -> tuple[dict, dict]:
         return f"{lang}:{_slugify(value)}"
 
     def _canonical_name_from_id(ingredient_id: str) -> str:
-        # en:soybean-oil -> soybean-oil
         return ingredient_id.split(":", 1)[1] if ":" in ingredient_id else ingredient_id
 
     def _ensure_props(ingredient_id: str):
@@ -113,7 +129,6 @@ def _parse_taxonomy(text: str) -> tuple[dict, dict]:
         key = key.strip()
         rest = rest.strip()
 
-        # Cas 1 : ligne de traduction (en, fr, de, ...)
         if _is_language_code(key):
             values = [v.strip() for v in rest.split(",") if v.strip()]
             if not values:
@@ -130,7 +145,6 @@ def _parse_taxonomy(text: str) -> tuple[dict, dict]:
 
             continue
 
-        # Cas 2 : propriété d’un ingrédient déjà ouvert
         if current_canonical is None:
             continue
 
@@ -160,10 +174,6 @@ def _parse_taxonomy(text: str) -> tuple[dict, dict]:
 # ---------------------------------------------------------------------------
 
 def _candidate_tags_from_ingredient(item: dict) -> list[str]:
-    """
-    Génère plusieurs candidats de matching OFF à partir d'un ingrédient.
-    Priorité : id, puis text.
-    """
     candidates = []
 
     ingredient_id = item.get("id")
@@ -186,18 +196,6 @@ def _canonical_name_from_id(ingredient_id: str) -> str:
 
 
 def _normalize_ingredient(item: dict, canonical_map: dict, ingredient_props: dict) -> dict | None:
-    """
-    Retourne un dict normalisé :
-      {
-        ingredient_id,
-        ingredient_name,
-        ingredient_text,
-        is_in_taxonomy,
-        vegan,
-        vegetarian,
-        from_palm_oil
-      }
-    """
     if not isinstance(item, dict):
         return None
 
@@ -228,7 +226,6 @@ def _normalize_ingredient(item: dict, canonical_map: dict, ingredient_props: dic
                 "from_palm_oil": props.get("from_palm_oil"),
             }
 
-    # Fallback : on garde un id construit, mais hors taxonomie
     raw_id = item.get("id")
     if isinstance(raw_id, str) and raw_id.strip():
         ingredient_id = raw_id.strip().lower()
@@ -236,8 +233,6 @@ def _normalize_ingredient(item: dict, canonical_map: dict, ingredient_props: dic
         ingredient_id = f"en:{_slugify(ingredient_text)}"
     else:
         return None
-
-    logger.warning(f"Ingredient not found in OFF taxonomy: '{ingredient_id}'")
 
     return {
         "ingredient_id": ingredient_id,
@@ -251,7 +246,7 @@ def _normalize_ingredient(item: dict, canonical_map: dict, ingredient_props: dic
 
 
 # ---------------------------------------------------------------------------
-# 5. Flatten récursif de la colonne ingredients
+# 5. Flatten récursif
 # ---------------------------------------------------------------------------
 
 def _flatten_ingredients_tree(
@@ -262,16 +257,11 @@ def _flatten_ingredients_tree(
     level: int = 0,
     parent_ingredient_id: str | None = None,
 ) -> list[dict]:
-    """
-    Parcourt récursivement la structure ingredients
-    et produit les lignes de product_ingredients.
-    """
     rows = []
 
-    if _is_null(ingredients):
-        return rows
+    ingredients = _parse_ingredients_value(ingredients)
 
-    if not isinstance(ingredients, list):
+    if not ingredients:
         return rows
 
     for order, item in enumerate(ingredients, start=1):
@@ -289,7 +279,6 @@ def _flatten_ingredients_tree(
             "ingredient_order": order,
             "ingredient_level": level,
             "parent_ingredient_id": parent_ingredient_id,
-            # colonnes utiles pour construire ingredients ensuite
             "ingredient_name": normalized["ingredient_name"],
             "is_in_taxonomy": normalized["is_in_taxonomy"],
             "vegan": normalized["vegan"],
@@ -299,7 +288,7 @@ def _flatten_ingredients_tree(
         rows.append(row)
 
         children = item.get("ingredients")
-        if isinstance(children, list) and children:
+        if children:
             rows.extend(
                 _flatten_ingredients_tree(
                     code=code,
@@ -319,15 +308,6 @@ def _flatten_ingredients_tree(
 # ---------------------------------------------------------------------------
 
 def _build_ingredients_table(df_product_ingredients: pd.DataFrame) -> pd.DataFrame:
-    """
-    Construit la table ingredients :
-      ingredient_id
-      ingredient_name
-      is_in_taxonomy
-      vegan
-      vegetarian
-      from_palm_oil
-    """
     if df_product_ingredients.empty:
         return pd.DataFrame(
             columns=[
@@ -340,7 +320,7 @@ def _build_ingredients_table(df_product_ingredients: pd.DataFrame) -> pd.DataFra
             ]
         )
 
-    df_ingredients = (
+    return (
         df_product_ingredients[
             [
                 "ingredient_id",
@@ -356,8 +336,6 @@ def _build_ingredients_table(df_product_ingredients: pd.DataFrame) -> pd.DataFra
         .reset_index(drop=True)
     )
 
-    return df_ingredients
-
 
 # ---------------------------------------------------------------------------
 # 7. Point d’entrée principal
@@ -368,25 +346,6 @@ def handle(
     ingredients_output_key: str,
     product_ingredients_output_key: str,
 ) -> None:
-    """
-    Normalise la colonne ingredients et produit deux parquets distincts sur S3 :
-
-    ingredients :
-      - ingredient_id
-      - ingredient_name
-      - is_in_taxonomy
-      - vegan
-      - vegetarian
-      - from_palm_oil
-
-    product_ingredients :
-      - code
-      - ingredient_id
-      - ingredient_text
-      - ingredient_order
-      - ingredient_level
-      - parent_ingredient_id
-    """
     s3_bucket = os.environ["S3_BUCKET"]
     s3_endpoint = os.environ["S3_ENDPOINT"]
     s3_access_key = os.environ["S3_ACCESS_KEY"]
@@ -456,6 +415,8 @@ def handle(
                 parent_ingredient_id=None,
             )
         )
+
+    logger.info(f"Flattened ingredient rows: {len(all_rows)}")
 
     df_full = pd.DataFrame(
         all_rows,
