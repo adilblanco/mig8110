@@ -133,7 +133,7 @@ PRODUCT_INGREDIENTS_FILE_KEY    = f"{DAG_ID}/silver/product_ingredients.parquet"
 FILTER_COLUMNS = ",".join([
     "code", "brands", "product_name", "product_quantity", "product_quantity_unit",
     "quantity", "serving_quantity", "serving_size", "categories_tags", "countries_tags",
-    "ecoscore_score", "ecoscore_grade", "images", "ingredients_tags", "ingredients_n",
+    "ecoscore_score", "ecoscore_grade", "images",
     "ingredients", "nutriscore_score", "nutriscore_grade", "nutriments",
 ])
 
