@@ -435,6 +435,13 @@ def handle(
         ],
     )
 
+    logger.info(f"df_full shape: {df_full.shape}")
+    if not df_full.empty:
+        logger.info("df_full head(10):\n" + df_full.head(10).to_string())
+        logger.info("df_full dtypes:\n" + df_full.dtypes.to_string())
+    else:
+        logger.warning("df_full is empty after flattening")
+
     if not df_full.empty:
         df_full = df_full.drop_duplicates().reset_index(drop=True)
 
@@ -450,6 +457,15 @@ def handle(
             "parent_ingredient_id",
         ]
     ].copy()
+
+    logger.info(f"df_ingredients shape: {df_ingredients.shape}")
+    logger.info(f"df_product_ingredients shape: {df_product_ingredients.shape}")
+
+    if not df_ingredients.empty:
+        logger.info("df_ingredients head(10):\n" + df_ingredients.head(10).to_string())
+
+    if not df_product_ingredients.empty:
+        logger.info("df_product_ingredients head(10):\n" + df_product_ingredients.head(10).to_string())
 
     s3_handler.upload_dataframe(df_ingredients, ingredients_output_key)
     logger.info(
