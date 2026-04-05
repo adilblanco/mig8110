@@ -1,4 +1,3 @@
-import ast
 import os
 import logging
 import requests
@@ -15,7 +14,7 @@ INGREDIENTS_TXT_URL = (
 
 
 # ---------------------------------------------------------------------------
-# 1. Téléchargement du fichier de référence
+# 1. Téléchargement du fichier de référence OFF
 # ---------------------------------------------------------------------------
 
 def _download_ingredients_txt(url: str) -> str:
@@ -28,30 +27,41 @@ def _download_ingredients_txt(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2. Parsing de la taxonomie
+# 2. Helpers généraux
 # ---------------------------------------------------------------------------
 
-def _is_language_code(lang: str) -> bool:
-    """Retourne True si lang est un code de langue ISO (2-3 lettres).
+def _is_null(value) -> bool:
+    return value is None or (isinstance(value, float) and np.isnan(value))
 
-    Permet de distinguer les lignes de traduction (en, fr, de)
-    des lignes de propriétés (vegan, nova, allergens, description, wikidata...)
-    sans avoir à les lister explicitement — robuste aux nouvelles propriétés OFF.
-    """
+
+def _slugify(value: str) -> str:
+    return value.strip().lower().replace(" ", "-")
+
+
+def _is_language_code(lang: str) -> bool:
     return lang.isalpha() and 2 <= len(lang) <= 3
 
 
-def _parse_taxonomy(text: str) -> dict:
-    """Parse ingredients.txt et retourne canonical_map.
+# ---------------------------------------------------------------------------
+# 3. Parsing enrichi de la taxonomie OFF
+# ---------------------------------------------------------------------------
 
-    canonical_map : {tag_quelconque -> tag_canonique}
-        Exemple : 'fr:huile-de-soja' -> 'en:soybean-oil'
+def _parse_taxonomy(text: str) -> tuple[dict, dict]:
+    """
+    Retourne :
+      1. canonical_map: alias -> ingredient_id canonique
+      2. ingredient_props: ingredient_id -> propriétés OFF
 
-    Seuls les lignes avec un code de langue ISO (2-3 lettres) sont traitées.
-    Les propriétés (vegan:, nova:, allergens:, description:, wikidata:, ...)
-    sont ignorées automatiquement via _is_language_code() — pas de liste hardcodée.
+    ingredient_props contient :
+      - ingredient_name
+      - is_in_taxonomy
+      - vegan
+      - vegetarian
+      - from_palm_oil
     """
     canonical_map: dict[str, str] = {}
+    ingredient_props: dict[str, dict] = {}
+
     current_canonical: str | None = None
 
     def _flush():
@@ -59,7 +69,32 @@ def _parse_taxonomy(text: str) -> dict:
         current_canonical = None
 
     def _to_tag(lang: str, value: str) -> str:
-        return f"{lang}:{value.strip().lower().replace(' ', '-')}"
+        return f"{lang}:{_slugify(value)}"
+
+    def _canonical_name_from_id(ingredient_id: str) -> str:
+        # en:soybean-oil -> soybean-oil
+        return ingredient_id.split(":", 1)[1] if ":" in ingredient_id else ingredient_id
+
+    def _ensure_props(ingredient_id: str):
+        if ingredient_id not in ingredient_props:
+            ingredient_props[ingredient_id] = {
+                "ingredient_id": ingredient_id,
+                "ingredient_name": _canonical_name_from_id(ingredient_id),
+                "is_in_taxonomy": True,
+                "vegan": None,
+                "vegetarian": None,
+                "from_palm_oil": None,
+            }
+
+    def _normalize_property_value(value: str):
+        val = value.strip().lower()
+        if val in {"yes", "true"}:
+            return True
+        if val in {"no", "false"}:
+            return False
+        if val in {"maybe", "unknown", "sometimes", ""}:
+            return None
+        return None
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -74,101 +109,258 @@ def _parse_taxonomy(text: str) -> dict:
         if ":" not in line:
             continue
 
-        lang, rest = line.split(":", 1)
-        lang = lang.strip()
+        key, rest = line.split(":", 1)
+        key = key.strip()
+        rest = rest.strip()
 
-        # Ignorer les propriétés OFF (vegan, nova, allergens, description, wikidata...)
-        # sans les lister : un code de langue est toujours 2-3 lettres alphabétiques.
-        if not _is_language_code(lang):
+        # Cas 1 : ligne de traduction (en, fr, de, ...)
+        if _is_language_code(key):
+            values = [v.strip() for v in rest.split(",") if v.strip()]
+            if not values:
+                continue
+
+            if current_canonical is None and key == "en":
+                current_canonical = _to_tag(key, values[0])
+                canonical_map[current_canonical] = current_canonical
+                _ensure_props(current_canonical)
+
+            if current_canonical:
+                for val in values:
+                    canonical_map.setdefault(_to_tag(key, val), current_canonical)
+
             continue
 
-        values = [v.strip() for v in rest.split(",") if v.strip()]
-
-        if not values:
+        # Cas 2 : propriété d’un ingrédient déjà ouvert
+        if current_canonical is None:
             continue
 
-        if current_canonical is None and lang == "en":
-            current_canonical = _to_tag(lang, values[0])
-            canonical_map[current_canonical] = current_canonical
+        _ensure_props(current_canonical)
 
-        if current_canonical:
-            for val in values:
-                canonical_map.setdefault(_to_tag(lang, val), current_canonical)
+        if key == "vegan":
+            ingredient_props[current_canonical]["vegan"] = _normalize_property_value(rest)
+        elif key == "vegetarian":
+            ingredient_props[current_canonical]["vegetarian"] = _normalize_property_value(rest)
+        elif key == "from_palm_oil":
+            ingredient_props[current_canonical]["from_palm_oil"] = _normalize_property_value(rest)
 
     _flush()
 
     logger.info(
-        f"Taxonomy parsed: {sum(1 for k,v in canonical_map.items() if k==v)} canonical ingredients, "
-        f"{len(canonical_map)} known tags (synonymes inclus)"
+        f"Taxonomy parsed: "
+        f"{sum(1 for k, v in canonical_map.items() if k == v)} canonical ingredients, "
+        f"{len(canonical_map)} known tags, "
+        f"{len(ingredient_props)} ingredients with properties"
     )
-    return canonical_map
+
+    return canonical_map, ingredient_props
 
 
 # ---------------------------------------------------------------------------
-# 3. Conversion de la colonne ingredients_tags
+# 4. Matching d’un ingrédient OFF
 # ---------------------------------------------------------------------------
 
-def _to_list(tags) -> list[str]:
-    """Convertit ingredients_tags en liste Python peu importe son type."""
-    if tags is None:
-        return []
-    if isinstance(tags, float) and np.isnan(tags):
-        return []
-    if isinstance(tags, str):
-        tags = tags.strip()
-        if not tags or tags == "[]":
-            return []
-        try:
-            parsed = ast.literal_eval(tags)
-            return list(parsed) if isinstance(parsed, (list, tuple)) else []
-        except (ValueError, SyntaxError):
-            return []
-    if isinstance(tags, list):
-        return tags
-    try:
-        return [t for t in tags if isinstance(t, str)]
-    except TypeError:
-        return []
-
-
-def _normalize_tags(tags, canonical_map: dict) -> list[str]:
-    """Mappe chaque tag vers son canonique OFF, dédoublonne, logge les inconnus."""
-    items = _to_list(tags)
-    normalized = []
-    seen = set()
-    for tag in items:
-        if not isinstance(tag, str):
-            continue
-        key = tag.strip().lower()
-        canonical = canonical_map.get(key, key)
-        if canonical not in seen:
-            normalized.append(canonical)
-            seen.add(canonical)
-        if key not in canonical_map:
-            logger.warning(f"Tag non reconnu dans la taxonomie OFF : '{tag}'")
-    return normalized
-
-
-# ---------------------------------------------------------------------------
-# 4. Construction de la table ingredients
-# ---------------------------------------------------------------------------
-
-def _build_ingredients_table(all_tags: set[str]) -> pd.DataFrame:
-    """Construit la table ingredients avec ingredient_name comme PK naturelle.
-
-    Une seule colonne pour l'instant. Les propriétés (vegan, nova_marker,
-    allergen) seront ajoutées dans une version future quand le schéma
-    incremental sera stabilisé.
+def _candidate_tags_from_ingredient(item: dict) -> list[str]:
     """
-    if not all_tags:
-        return pd.DataFrame(columns=["ingredient_name"])
-    return pd.DataFrame(
-        [{"ingredient_name": tag} for tag in sorted(all_tags)]
-    )
+    Génère plusieurs candidats de matching OFF à partir d'un ingrédient.
+    Priorité : id, puis text.
+    """
+    candidates = []
+
+    ingredient_id = item.get("id")
+    if isinstance(ingredient_id, str) and ingredient_id.strip():
+        candidates.append(ingredient_id.strip().lower())
+
+    text = item.get("text")
+    if isinstance(text, str) and text.strip():
+        slug = _slugify(text)
+        candidates.extend([
+            f"en:{slug}",
+            f"fr:{slug}",
+        ])
+
+    return candidates
+
+
+def _canonical_name_from_id(ingredient_id: str) -> str:
+    return ingredient_id.split(":", 1)[1] if ":" in ingredient_id else ingredient_id
+
+
+def _normalize_ingredient(item: dict, canonical_map: dict, ingredient_props: dict) -> dict | None:
+    """
+    Retourne un dict normalisé :
+      {
+        ingredient_id,
+        ingredient_name,
+        ingredient_text,
+        is_in_taxonomy,
+        vegan,
+        vegetarian,
+        from_palm_oil
+      }
+    """
+    if not isinstance(item, dict):
+        return None
+
+    ingredient_text = item.get("text")
+    ingredient_text = ingredient_text.strip() if isinstance(ingredient_text, str) and ingredient_text.strip() else None
+
+    for candidate in _candidate_tags_from_ingredient(item):
+        if candidate in canonical_map:
+            ingredient_id = canonical_map[candidate]
+            props = ingredient_props.get(
+                ingredient_id,
+                {
+                    "ingredient_id": ingredient_id,
+                    "ingredient_name": _canonical_name_from_id(ingredient_id),
+                    "is_in_taxonomy": True,
+                    "vegan": None,
+                    "vegetarian": None,
+                    "from_palm_oil": None,
+                },
+            )
+            return {
+                "ingredient_id": ingredient_id,
+                "ingredient_name": props["ingredient_name"],
+                "ingredient_text": ingredient_text,
+                "is_in_taxonomy": True,
+                "vegan": props.get("vegan"),
+                "vegetarian": props.get("vegetarian"),
+                "from_palm_oil": props.get("from_palm_oil"),
+            }
+
+    # Fallback : on garde un id construit, mais hors taxonomie
+    raw_id = item.get("id")
+    if isinstance(raw_id, str) and raw_id.strip():
+        ingredient_id = raw_id.strip().lower()
+    elif ingredient_text:
+        ingredient_id = f"en:{_slugify(ingredient_text)}"
+    else:
+        return None
+
+    logger.warning(f"Ingredient not found in OFF taxonomy: '{ingredient_id}'")
+
+    return {
+        "ingredient_id": ingredient_id,
+        "ingredient_name": _canonical_name_from_id(ingredient_id),
+        "ingredient_text": ingredient_text,
+        "is_in_taxonomy": False,
+        "vegan": None,
+        "vegetarian": None,
+        "from_palm_oil": None,
+    }
 
 
 # ---------------------------------------------------------------------------
-# 5. Point d'entrée principal
+# 5. Flatten récursif de la colonne ingredients
+# ---------------------------------------------------------------------------
+
+def _flatten_ingredients_tree(
+    code,
+    ingredients,
+    canonical_map: dict,
+    ingredient_props: dict,
+    level: int = 0,
+    parent_ingredient_id: str | None = None,
+) -> list[dict]:
+    """
+    Parcourt récursivement la structure ingredients
+    et produit les lignes de product_ingredients.
+    """
+    rows = []
+
+    if _is_null(ingredients):
+        return rows
+
+    if not isinstance(ingredients, list):
+        return rows
+
+    for order, item in enumerate(ingredients, start=1):
+        if not isinstance(item, dict):
+            continue
+
+        normalized = _normalize_ingredient(item, canonical_map, ingredient_props)
+        if not normalized:
+            continue
+
+        row = {
+            "code": code,
+            "ingredient_id": normalized["ingredient_id"],
+            "ingredient_text": normalized["ingredient_text"],
+            "ingredient_order": order,
+            "ingredient_level": level,
+            "parent_ingredient_id": parent_ingredient_id,
+            # colonnes utiles pour construire ingredients ensuite
+            "ingredient_name": normalized["ingredient_name"],
+            "is_in_taxonomy": normalized["is_in_taxonomy"],
+            "vegan": normalized["vegan"],
+            "vegetarian": normalized["vegetarian"],
+            "from_palm_oil": normalized["from_palm_oil"],
+        }
+        rows.append(row)
+
+        children = item.get("ingredients")
+        if isinstance(children, list) and children:
+            rows.extend(
+                _flatten_ingredients_tree(
+                    code=code,
+                    ingredients=children,
+                    canonical_map=canonical_map,
+                    ingredient_props=ingredient_props,
+                    level=level + 1,
+                    parent_ingredient_id=normalized["ingredient_id"],
+                )
+            )
+
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# 6. Construction de la table ingredients
+# ---------------------------------------------------------------------------
+
+def _build_ingredients_table(df_product_ingredients: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construit la table ingredients :
+      ingredient_id
+      ingredient_name
+      is_in_taxonomy
+      vegan
+      vegetarian
+      from_palm_oil
+    """
+    if df_product_ingredients.empty:
+        return pd.DataFrame(
+            columns=[
+                "ingredient_id",
+                "ingredient_name",
+                "is_in_taxonomy",
+                "vegan",
+                "vegetarian",
+                "from_palm_oil",
+            ]
+        )
+
+    df_ingredients = (
+        df_product_ingredients[
+            [
+                "ingredient_id",
+                "ingredient_name",
+                "is_in_taxonomy",
+                "vegan",
+                "vegetarian",
+                "from_palm_oil",
+            ]
+        ]
+        .drop_duplicates(subset=["ingredient_id"])
+        .sort_values("ingredient_id")
+        .reset_index(drop=True)
+    )
+
+    return df_ingredients
+
+
+# ---------------------------------------------------------------------------
+# 7. Point d’entrée principal
 # ---------------------------------------------------------------------------
 
 def handle(
@@ -176,22 +368,27 @@ def handle(
     ingredients_output_key: str,
     product_ingredients_output_key: str,
 ) -> None:
-    """Normalise ingredients_tags et produit deux parquets distincts sur S3.
-
-    Remplace la colonne ingredients_tags monolithique par :
-        ingredients          : référentiel OFF (ingredient_name)
-        product_ingredients  : table de jonction Many-to-Many (code, ingredient_name)
-
-    La table products (sans ingredients_tags) est produite par finalize_products
-    après l'exécution parallèle de normalize_categories et normalize_ingredients.
-
-    Args:
-        input_file_key:                   Clé S3 du parquet validé (silver brut).
-        ingredients_output_key:           Clé S3 de sortie pour la table ingredients.
-        product_ingredients_output_key:   Clé S3 de sortie pour la jonction.
     """
-    s3_bucket     = os.environ["S3_BUCKET"]
-    s3_endpoint   = os.environ["S3_ENDPOINT"]
+    Normalise la colonne ingredients et produit deux parquets distincts sur S3 :
+
+    ingredients :
+      - ingredient_id
+      - ingredient_name
+      - is_in_taxonomy
+      - vegan
+      - vegetarian
+      - from_palm_oil
+
+    product_ingredients :
+      - code
+      - ingredient_id
+      - ingredient_text
+      - ingredient_order
+      - ingredient_level
+      - parent_ingredient_id
+    """
+    s3_bucket = os.environ["S3_BUCKET"]
+    s3_endpoint = os.environ["S3_ENDPOINT"]
     s3_access_key = os.environ["S3_ACCESS_KEY"]
     s3_secret_key = os.environ["S3_SECRET_KEY"]
 
@@ -200,73 +397,105 @@ def handle(
     s3_handler = S3FileHandler(s3_bucket, s3_endpoint, s3_access_key, s3_secret_key)
 
     raw = s3_handler.download_to_memory(input_file_key)
-    df  = pd.read_parquet(raw)
+    df = pd.read_parquet(raw)
 
-    # -----------------------------------------------------------------------
-    # Diagnostic
-    # -----------------------------------------------------------------------
-    if "ingredients_tags" not in df.columns:
+    if "ingredients" not in df.columns:
         logger.error(
-            "COLONNE 'ingredients_tags' ABSENTE DU PARQUET. "
-            f"Colonnes disponibles : {df.columns.tolist()}"
+            "COLUMN 'ingredients' NOT FOUND IN PARQUET. "
+            f"Available columns: {df.columns.tolist()}"
         )
         s3_handler.upload_dataframe(
-            pd.DataFrame(columns=["ingredient_name"]),
+            pd.DataFrame(
+                columns=[
+                    "ingredient_id",
+                    "ingredient_name",
+                    "is_in_taxonomy",
+                    "vegan",
+                    "vegetarian",
+                    "from_palm_oil",
+                ]
+            ),
             ingredients_output_key,
         )
         s3_handler.upload_dataframe(
-            pd.DataFrame(columns=["code", "ingredient_name"]),
+            pd.DataFrame(
+                columns=[
+                    "code",
+                    "ingredient_id",
+                    "ingredient_text",
+                    "ingredient_order",
+                    "ingredient_level",
+                    "parent_ingredient_id",
+                ]
+            ),
             product_ingredients_output_key,
         )
         return
 
-    col = df["ingredients_tags"]
+    col = df["ingredients"]
     sample = col.dropna().head(3)
     logger.info(
-        f"[DIAG] ingredients_tags — dtype={col.dtype} | "
-        f"non-null={col.notna().sum()}/{len(col)} | "
+        f"[DIAG] ingredients — dtype={col.dtype} | "
+        f"non-null={col.notna().sum()}/{len(df)} | "
         f"sample types={[type(v).__name__ for v in sample]} | "
-        f"sample values={[repr(v)[:60] for v in sample]}"
+        f"sample values={[repr(v)[:120] for v in sample]}"
     )
 
-    # -----------------------------------------------------------------------
-    # Normalisation
-    # -----------------------------------------------------------------------
     ingredients_txt = _download_ingredients_txt(INGREDIENTS_TXT_URL)
-    canonical_map   = _parse_taxonomy(ingredients_txt)
+    canonical_map, ingredient_props = _parse_taxonomy(ingredients_txt)
 
-    df["ingredients_tags"] = df["ingredients_tags"].apply(
-        lambda tags: _normalize_tags(tags, canonical_map)
+    all_rows = []
+    for _, row in df[["code", "ingredients"]].iterrows():
+        all_rows.extend(
+            _flatten_ingredients_tree(
+                code=row["code"],
+                ingredients=row["ingredients"],
+                canonical_map=canonical_map,
+                ingredient_props=ingredient_props,
+                level=0,
+                parent_ingredient_id=None,
+            )
+        )
+
+    df_full = pd.DataFrame(
+        all_rows,
+        columns=[
+            "code",
+            "ingredient_id",
+            "ingredient_text",
+            "ingredient_order",
+            "ingredient_level",
+            "parent_ingredient_id",
+            "ingredient_name",
+            "is_in_taxonomy",
+            "vegan",
+            "vegetarian",
+            "from_palm_oil",
+        ],
     )
 
-    all_tags: set[str] = set()
-    for tags in df["ingredients_tags"]:
-        all_tags.update(tags)
-    logger.info(f"Unique normalized ingredients: {len(all_tags)}")
+    if not df_full.empty:
+        df_full = df_full.drop_duplicates().reset_index(drop=True)
 
-    # -----------------------------------------------------------------------
-    # Construction des tables
-    # -----------------------------------------------------------------------
-    df_ingredients = _build_ingredients_table(all_tags)
+    df_ingredients = _build_ingredients_table(df_full)
 
-    valid_ingredients = set(df_ingredients["ingredient_name"])
-    junction_rows = [
-        {"code": row["code"], "ingredient_name": tag}
-        for _, row in df[["code", "ingredients_tags"]].iterrows()
-        for tag in row["ingredients_tags"]
-        if tag in valid_ingredients
-    ]
-    df_product_ingredients = pd.DataFrame(
-        junction_rows if junction_rows else [],
-        columns=["code", "ingredient_name"],
-    )
+    df_product_ingredients = df_full[
+        [
+            "code",
+            "ingredient_id",
+            "ingredient_text",
+            "ingredient_order",
+            "ingredient_level",
+            "parent_ingredient_id",
+        ]
+    ].copy()
 
-    # -----------------------------------------------------------------------
-    # Upload
-    # -----------------------------------------------------------------------
     s3_handler.upload_dataframe(df_ingredients, ingredients_output_key)
-    logger.info(f"ingredients uploaded → {ingredients_output_key} ({len(df_ingredients)} records)")
+    logger.info(
+        f"ingredients uploaded → {ingredients_output_key} ({len(df_ingredients)} records)"
+    )
 
     s3_handler.upload_dataframe(df_product_ingredients, product_ingredients_output_key)
-    logger.info(f"product_ingredients uploaded → {product_ingredients_output_key} ({len(df_product_ingredients)} records)")
-    
+    logger.info(
+        f"product_ingredients uploaded → {product_ingredients_output_key} ({len(df_product_ingredients)} records)"
+    )
