@@ -1,16 +1,20 @@
-# app/main.py
+# app/main1.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from app.routers import products
 from app.api import product_routes
 from app.db import get_connection
 
 
 app = FastAPI(
-    title="OFF Canada API",
+    title="FoodHealth Advisor",
     description="API pour explorer les produits alimentaires canadiens",
     version="1.0.0"
 )
+
+app.mount("fontend/src/pages", StaticFiles(directory="static"), name="static")
+
 
 # 🌐 CORS configuration pour autoriser le frontend React
 origins = [
@@ -31,7 +35,7 @@ app.include_router(products.router, prefix="/api")
 
 @app.get("/health", tags=["health"])
 def health():
-    db = get_connection ()
-    db.execute("SELECT 1")
+    with get_connection() as conn:
+        conn.execute("SELECT 1")
     return {"status": "ok"}
 

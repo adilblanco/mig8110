@@ -13,6 +13,7 @@ router = APIRouter(prefix="/products", tags=["products"])
 def list_products(
     q: Optional[str] = Query(None, description="Recherche par nom de produit"),
     brand: Optional[str] = Query(None, description="Filtre par marque"),
+    limit: int = Query(500, ge=1, le=1000, description="Nombre maximum de résultats"),
 ):
     # On initialise le DAO (ou on utilise la méthode static si définie)
     dao = ProductDAO()
