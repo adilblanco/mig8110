@@ -6,23 +6,26 @@ Ce DAG est déclenché manuellement (schedule_interval=None) et doit être exéc
 fois pour initialiser les données, ou relancé pour un rechargement complet.
 
 Pipeline :
-    extract_data            : Télécharge le snapshot parquet depuis GitHub et le dépose sur S3 (Bronze)
-    filter_data             : Sélectionne les colonnes utiles pour réduire l'empreinte mémoire
-    load_bronze             : Charge le parquet brut (toutes colonnes) dans MotherDuck (off.bronze) — en parallèle avec filter_data
-    validate_data           : Sépare les enregistrements valides des invalides selon les règles définies
-    transform_data          : Transforme les données : product_name, URLs d'images, nutriments à plat
-    normalize_categories    : (parallèle) Normalise categories_tags → categories + product_categories
-    normalize_ingredients   : (parallèle) Normalise ingredients → ingredients + product_ingredients
-    finalize_products       : Supprime categories_tags et ingredients → produit la table products finale
-    load_products           : Charge silver.products dans MotherDuck
-    load_categories         : Charge silver.categories dans MotherDuck
-    load_product_categories : Charge silver.product_categories dans MotherDuck
-    load_ingredients        : Charge silver.ingredients dans MotherDuck
-    load_product_ingredients: Charge silver.product_ingredients dans MotherDuck
+    extract_data             : Télécharge le snapshot parquet depuis GitHub et le dépose sur S3 (Bronze)
+    filter_data              : Sélectionne les colonnes utiles pour réduire l'empreinte mémoire
+    load_bronze              : Charge le parquet brut (toutes colonnes) dans MotherDuck (off.bronze) — en parallèle avec filter_data
+    validate_data            : Sépare les enregistrements valides des invalides selon les règles définies
+    transform_data           : Transforme les données : product_name, URLs d'images, nutriments à plat
+    normalize_categories     : (parallèle) Normalise categories_tags → categories + product_categories
+    normalize_ingredients    : (parallèle) Normalise ingredients →
+                               ingredients + product_ingredients + sous_ingredients + ingredient_alias
+    finalize_products        : Supprime categories_tags et ingredients → produit la table products finale
+    load_products            : Charge silver.products dans MotherDuck
+    load_categories          : Charge silver.categories dans MotherDuck
+    load_product_categories  : Charge silver.product_categories dans MotherDuck
+    load_ingredients         : Charge silver.ingredients dans MotherDuck
+    load_product_ingredients : Charge silver.product_ingredients dans MotherDuck
+    load_sous_ingredients    : Charge silver.sous_ingredients dans MotherDuck
+    load_ingredient_alias    : Charge silver.ingredient_alias dans MotherDuck
 
 Outputs S3 (bucket: bi-dev) :
     Fichier S3                                    Couche    Destination MotherDuck
-    ────────────────────────────────────────────────────────────────────────────────────
+    ─────────────────────────────────────────────────────────────────────────────────────────────
     bronze/data.parquet                           Bronze    —  (bronze.products)
     bronze/data_filtered.parquet                  Bronze    —  (transit)
     bronze/data_invalid.parquet                   Bronze    —  (quarantaine)
@@ -33,14 +36,18 @@ Outputs S3 (bucket: bi-dev) :
     silver/product_categories.parquet             Silver    —  (silver.product_categories)
     silver/ingredients.parquet                    Silver    —  (silver.ingredients)
     silver/product_ingredients.parquet            Silver    —  (silver.product_ingredients)
+    silver/sous_ingredients.parquet               Silver    —  (silver.sous_ingredients)
+    silver/ingredient_alias.parquet               Silver    —  (silver.ingredient_alias)
 
 Outputs MotherDuck (base: off) :
-    bronze.products               : Données brutes filtrées
+    bronze.products               : Données brutes
     silver.products               : Produits transformés sans colonnes normalisées
-    silver.categories             : Référentiel OFF avec hiérarchie — chargé par category_name
+    silver.categories             : Référentiel OFF catégories
     silver.product_categories     : Jonction Many-to-Many (code, category_name)
-    silver.ingredients            : Référentiel OFF ingrédients — chargé par ingredient_name
-    silver.product_ingredients    : Jonction Many-to-Many (code, ingredient_name)
+    silver.ingredients            : Référentiel OFF ingrédients — (ingredient_id, ingredient_name)
+    silver.product_ingredients    : Jonction produit-ingrédient (code, ingredient_id, ingredient_order, role)
+    silver.sous_ingredients       : Composition des ingrédients composés
+    silver.ingredient_alias       : Synonymes / variantes textuelles d’un ingrédient
     monitoring.pipeline_runs      : Métriques d'exécution (records_in, records_out, rejection_rate)
 """
 import pendulum
@@ -51,7 +58,7 @@ from plugins.operators.duckdb_operator import DuckDBOperator
 from plugins.operators.custom_kubernetes_operator import CustomKubernetesPodOperator
 
 
-IMAGE  = "mig8110/etl-images:1.0.0"
+IMAGE = "mig8110/etl-images:1.0.0"
 DAG_ID = "off_initial_load"
 
 RESOURCES_HEAVY = k8s.V1ResourceRequirements(
@@ -114,19 +121,23 @@ CATEGORIES_TABLE = "categories"
 PRODUCT_CATEGORIES_TABLE = "product_categories"
 INGREDIENTS_TABLE = "ingredients"
 PRODUCT_INGREDIENTS_TABLE = "product_ingredients"
+SOUS_INGREDIENTS_TABLE = "sous_ingredients"
+INGREDIENT_ALIAS_TABLE = "ingredient_alias"
 
 RAW_FILE_KEY = f"{DAG_ID}/bronze/data.parquet"
 FILTERED_FILE_KEY = f"{DAG_ID}/bronze/data_filtered.parquet"
 INVALID_FILE_KEY = f"{DAG_ID}/bronze/data_invalid.parquet"
 VALID_FILE_KEY = f"{DAG_ID}/silver/data_valid.parquet"
 TRANSFORMED_FILE_KEY = f"{DAG_ID}/silver/data_transformed.parquet"
+
 PRODUCTS_FILE_KEY = f"{DAG_ID}/silver/products.parquet"
 CATEGORIES_FILE_KEY = f"{DAG_ID}/silver/categories.parquet"
 PRODUCT_CATEGORIES_FILE_KEY = f"{DAG_ID}/silver/product_categories.parquet"
 INGREDIENTS_FILE_KEY = f"{DAG_ID}/silver/ingredients.parquet"
 PRODUCT_INGREDIENTS_FILE_KEY = f"{DAG_ID}/silver/product_ingredients.parquet"
+SOUS_INGREDIENTS_FILE_KEY = f"{DAG_ID}/silver/sous_ingredients.parquet"
+INGREDIENT_ALIAS_FILE_KEY = f"{DAG_ID}/silver/ingredient_alias.parquet"
 
-# On garde ingredients, plus ingredients_tags
 FILTER_COLUMNS = ",".join([
     "code",
     "brands",
@@ -256,6 +267,8 @@ with dag:
             "--input_file_key", TRANSFORMED_FILE_KEY,
             "--ingredients_output_key", INGREDIENTS_FILE_KEY,
             "--product_ingredients_output_key", PRODUCT_INGREDIENTS_FILE_KEY,
+            "--sous_ingredients_output_key", SOUS_INGREDIENTS_FILE_KEY,
+            "--ingredient_alias_output_key", INGREDIENT_ALIAS_FILE_KEY,
         ],
     )
 
@@ -342,6 +355,34 @@ with dag:
         ],
     )
 
+    load_sous_ingredients = CustomKubernetesPodOperator(
+        dag=dag,
+        name="load-sous-ingredients",
+        image=IMAGE,
+        env_vars={**s3_env_vars, **duckdb_env_vars},
+        container_resources=RESOURCES_LIGHT,
+        arguments=[
+            "--command", "load_data",
+            "--input_file_key", SOUS_INGREDIENTS_FILE_KEY,
+            "--table_name", SOUS_INGREDIENTS_TABLE,
+            "--schema_name", f"{DATABASE_NAME}.{SILVER_SCHEMA}",
+        ],
+    )
+
+    load_ingredient_alias = CustomKubernetesPodOperator(
+        dag=dag,
+        name="load-ingredient-alias",
+        image=IMAGE,
+        env_vars={**s3_env_vars, **duckdb_env_vars},
+        container_resources=RESOURCES_LIGHT,
+        arguments=[
+            "--command", "load_data",
+            "--input_file_key", INGREDIENT_ALIAS_FILE_KEY,
+            "--table_name", INGREDIENT_ALIAS_TABLE,
+            "--schema_name", f"{DATABASE_NAME}.{SILVER_SCHEMA}",
+        ],
+    )
+
     end = EmptyOperator(task_id="end")
 
     start >> create_schemas >> extract_data
@@ -352,7 +393,19 @@ with dag:
 
     finalize_products >> load_products
     normalize_categories >> [load_categories, load_product_categories]
-    normalize_ingredients >> [load_ingredients, load_product_ingredients]
+    normalize_ingredients >> [
+        load_ingredients,
+        load_product_ingredients,
+        load_sous_ingredients,
+        load_ingredient_alias,
+    ]
 
-    [load_products, load_categories, load_product_categories,
-     load_ingredients, load_product_ingredients] >> end
+    [
+        load_products,
+        load_categories,
+        load_product_categories,
+        load_ingredients,
+        load_product_ingredients,
+        load_sous_ingredients,
+        load_ingredient_alias,
+    ] >> end
