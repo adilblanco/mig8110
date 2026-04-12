@@ -90,11 +90,9 @@ def handle(input_file_key, output_file_key):
     parquet_bytes = s3_handler.download_to_memory(input_file_key)
     df = pd.read_parquet(parquet_bytes)
 
-    # product_name : extraction du libellé principal
     if "product_name" in df.columns:
         df["product_name"] = df["product_name"].apply(_extract_product_name)
 
-    # images : reconstruction des URLs OFF
     if "images" in df.columns and "code" in df.columns:
         for image_key, col_name in IMAGE_KEYS:
             df[col_name] = [
@@ -102,14 +100,12 @@ def handle(input_file_key, output_file_key):
                 for images, code in zip(df["images"], df["code"])
             ]
 
-    # nutriments : pivot vers colonnes plates
     if "nutriments" in df.columns:
         for nutriment_name, col_name in NUTRIMENTS:
             df[col_name] = df["nutriments"].apply(
                 lambda lst, n=nutriment_name: _extract_nutriment(lst, n)
             )
 
-    # whitelist grades
     if "nutriscore_grade" in df.columns:
         df["nutriscore_grade"] = df["nutriscore_grade"].where(
             df["nutriscore_grade"].isin(["a", "b", "c", "d", "e"]), None
@@ -120,9 +116,8 @@ def handle(input_file_key, output_file_key):
             df["ecoscore_grade"].isin(["a-plus", "a", "b", "c", "d", "e", "f"]), None
         )
 
-    # IMPORTANT :
-    # on garde la colonne ingredients pour normalize_ingredients
-    # elle doit aussi être présente dans TARGET_COLUMNS
+    # IMPORTANT:
+    # la colonne ingredients doit rester disponible pour normalize_ingredients
     for col in TARGET_COLUMNS:
         if col not in df.columns:
             logger.warning(f"Column '{col}' not found in transformed data, filling with None.")
