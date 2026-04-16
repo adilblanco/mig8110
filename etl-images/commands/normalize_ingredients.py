@@ -112,7 +112,6 @@ def _parse_ingredients_value(value: Any) -> list:
 # Standardisation du nom d'ingrédient
 # ---------------------------------------------------------------------------
 
-# Mots/termes à préserver tels quels (insensibles à la casse)
 _PRESERVE_CASE = {
     "ph": "pH",
     "dha": "DHA",
@@ -126,7 +125,6 @@ _PRESERVE_CASE = {
     "dl": "DL",
 }
 
-# Petits mots qui restent en minuscule sauf en début de nom
 _LOWERCASE_WORDS = {
     "de", "du", "des", "le", "la", "les", "et", "ou", "au", "aux", "en",
     "of", "the", "and", "or", "in", "with", "from", "for", "a", "an",
@@ -134,20 +132,6 @@ _LOWERCASE_WORDS = {
 
 
 def _smart_title_case(text: str) -> str:
-    """
-    Title case intelligent pour les noms d'ingrédients.
-
-    Exemples :
-        water              → Water
-        COCOA MASS         → Cocoa Mass
-        caramel color      → Caramel Color
-        e150a              → E150a
-        vitamin b12        → Vitamin B12
-        ph adjuster        → pH Adjuster
-        beurre de cacao    → Beurre de Cacao
-        DL-Methionine      → DL-Methionine
-        soy lecithin       → Soy Lecithin
-    """
     if not text:
         return text
 
@@ -157,22 +141,18 @@ def _smart_title_case(text: str) -> str:
     for i, word in enumerate(words):
         lower = word.lower()
 
-        # 1. Acronymes et termes à préserver
         if lower in _PRESERVE_CASE:
             result.append(_PRESERVE_CASE[lower])
             continue
 
-        # 2. Codes additifs : e150a → E150a, e412 → E412
         if re.match(r'^e\d', lower):
             result.append(lower[0].upper() + lower[1:])
             continue
 
-        # 3. Vitamines avec suffixe : b12 → B12, d3 → D3, k2 → K2
         if re.match(r'^[a-z]\d+$', lower):
             result.append(word.upper())
             continue
 
-        # 4. Composé avec préfixe DL- / D- / L- : dl-alpha → DL-Alpha
         dl_match = re.match(r'^(dl|d|l)-(.+)$', lower)
         if dl_match:
             prefix = dl_match.group(1).upper()
@@ -180,22 +160,16 @@ def _smart_title_case(text: str) -> str:
             result.append(f"{prefix}-{rest}")
             continue
 
-        # 5. Petits mots (sauf en position initiale)
         if i > 0 and lower in _LOWERCASE_WORDS:
             result.append(lower)
             continue
 
-        # 6. Cas standard
         result.append(word.capitalize())
 
     return " ".join(result)
 
 
 def _humanize_name(slug: str) -> str:
-    """
-    Convertit un slug en nom lisible avec _smart_title_case.
-    Fallback de dernier recours quand aucun text n'est disponible.
-    """
     if not slug:
         return slug
     name = slug.replace("-", " ").replace("_", " ")
@@ -208,26 +182,12 @@ def _get_display_name(
     taxonomy_en_map: dict[str, str],
     taxonomy_fr_map: dict[str, str] | None = None,
 ) -> str:
-    """
-    Retourne le nom lisible d'un ingrédient, par ordre de priorité :
-      1. Champ "text" du JSON (source produit) — déjà nettoyé et standardisé
-      2. Nom anglais extrait de la taxonomie OFF
-      3. Nom français extrait de la taxonomie OFF
-      4. Fallback : humanisation du slug
-    """
-    # 1. Nom du champ text (collecté pendant le flattening)
     if ingredient_id in text_name_map:
         return text_name_map[ingredient_id]
-
-    # 2. Nom taxonomique anglais
     if ingredient_id in taxonomy_en_map:
         return taxonomy_en_map[ingredient_id]
-
-    # 3. Nom taxonomique français
     if taxonomy_fr_map and ingredient_id in taxonomy_fr_map:
         return taxonomy_fr_map[ingredient_id]
-
-    # 4. Fallback : humaniser le slug
     raw = _canonical_name_from_id(ingredient_id)
     return _humanize_name(raw)
 
@@ -252,15 +212,6 @@ def _download_taxonomy(url: str) -> str:
 def _parse_taxonomy_with_properties(
     text: str,
 ) -> tuple[dict[str, str], dict[str, dict[str, str]], dict[str, str], dict[str, str]]:
-    """
-    Parse une taxonomie OFF texte.
-
-    Retourne :
-    - canonical_map         : tag -> canonical_id
-    - properties_map        : canonical_id -> dict de propriétés
-    - display_name_map      : canonical_id -> nom lisible anglais
-    - fr_display_name_map   : canonical_id -> nom lisible français
-    """
     canonical_map: dict[str, str] = {}
     properties_map: dict[str, dict[str, str]] = {}
     display_name_map: dict[str, str] = {}
@@ -422,16 +373,11 @@ def _normalize_ingredient(
     item: dict,
     canonical_map: dict[str, str],
 ) -> dict | None:
-    """
-    Résout l'ingredient_id canonique et extrait le text brut.
-    Le ingredient_name sera déterminé plus tard via text_name_map.
-    """
     if not isinstance(item, dict):
         return None
 
     raw_text = _safe_text(item.get("text"))
 
-    # 1. tentative via taxonomie OFF
     for candidate in _candidate_tags_from_item(item):
         if candidate in canonical_map:
             ingredient_id = canonical_map[candidate]
@@ -440,7 +386,6 @@ def _normalize_ingredient(
                 "raw_text": raw_text,
             }
 
-    # 2. fallback sur l'id source
     raw_id = item.get("id")
     if isinstance(raw_id, str) and raw_id.strip():
         ingredient_id = raw_id.strip().lower()
@@ -449,7 +394,6 @@ def _normalize_ingredient(
             "raw_text": raw_text,
         }
 
-    # 3. fallback sur le texte source
     if raw_text:
         slug = _slugify(raw_text)
         if slug:
@@ -467,26 +411,12 @@ def _normalize_ingredient(
 # ---------------------------------------------------------------------------
 
 def _build_text_name_map(text_votes: dict[str, dict[str, int]]) -> dict[str, str]:
-    """
-    Pour chaque ingredient_id, choisit le text le plus fréquent parmi
-    tous les produits, puis applique _smart_title_case.
-
-    text_votes : { ingredient_id: { "raw text": count, ... } }
-
-    Exemple :
-        en:sugar → {"sugar": 45, "SUGAR": 12, "Sugar": 30}
-        → le plus fréquent est "sugar" (45)
-        → après _smart_title_case → "Sugar"
-    """
     text_name_map: dict[str, str] = {}
-
     for ingredient_id, votes in text_votes.items():
         if not votes:
             continue
-        # Choisir le text le plus fréquent
         best_text = max(votes, key=votes.get)
         text_name_map[ingredient_id] = _smart_title_case(best_text)
-
     return text_name_map
 
 
@@ -517,7 +447,7 @@ def _flatten_tree(
         ingredient_id = normalized["ingredient_id"]
         raw_text = normalized["raw_text"]
 
-        # ── Collecter le vote pour le nom "text" ──
+        # Collecter le vote pour le nom "text"
         if raw_text:
             if ingredient_id not in text_votes:
                 text_votes[ingredient_id] = {}
@@ -536,9 +466,10 @@ def _flatten_tree(
                 }
             )
         else:
-            # sous_ingredient_name sera résolu après le flattening complet
+            # sous_ingredients : inclut le code du produit
             all_component_rows.append(
                 {
+                    "code": code,
                     "ingredient_id": parent_ingredient_id,
                     "sous_ingredient_id": ingredient_id,
                     "raw_text": raw_text,
@@ -618,15 +549,12 @@ def _build_sous_ingredients_df(
     taxonomy_en_map: dict[str, str],
     taxonomy_fr_map: dict[str, str],
 ) -> pd.DataFrame:
-    """
-    Construit le DataFrame sous_ingredients avec sous_ingredient_name
-    résolu depuis text_name_map (prioritaire) puis taxonomie.
-    """
     records = []
     for row in component_rows:
         sous_id = row["sous_ingredient_id"]
         records.append(
             {
+                "code": row["code"],
                 "ingredient_id": row["ingredient_id"],
                 "sous_ingredient_id": sous_id,
                 "sous_ingredient_name": _get_display_name(
@@ -637,7 +565,7 @@ def _build_sous_ingredients_df(
         )
     return pd.DataFrame(
         records,
-        columns=["ingredient_id", "sous_ingredient_id", "sous_ingredient_name", "rang"],
+        columns=["code", "ingredient_id", "sous_ingredient_id", "sous_ingredient_name", "rang"],
     )
 
 
@@ -647,10 +575,6 @@ def _build_alias_df(
     taxonomy_en_map: dict[str, str],
     taxonomy_fr_map: dict[str, str],
 ) -> pd.DataFrame:
-    """
-    Construit le DataFrame alias en filtrant les alias qui correspondent
-    exactement au ingredient_name résolu.
-    """
     records = []
     for row in alias_rows:
         ingredient_id = row["ingredient_id"]
@@ -658,7 +582,6 @@ def _build_alias_df(
         display_name = _get_display_name(
             ingredient_id, text_name_map, taxonomy_en_map, taxonomy_fr_map
         )
-        # Ne garder l'alias que s'il diffère du nom final
         if alias_name != display_name.lower():
             records.append(
                 {
@@ -679,7 +602,7 @@ def _empty_product_ingredients_df() -> pd.DataFrame:
 
 def _empty_sous_ingredients_df() -> pd.DataFrame:
     return pd.DataFrame(
-        columns=["ingredient_id", "sous_ingredient_id", "sous_ingredient_name", "rang"]
+        columns=["code", "ingredient_id", "sous_ingredient_id", "sous_ingredient_name", "rang"]
     )
 
 
@@ -750,7 +673,6 @@ def handle(
         _parse_taxonomy_with_properties(additive_classes_txt)
     )
 
-    # Fusionner les taxonomy display names (fallback seulement)
     taxonomy_en_map = {**ingredients_en_map, **additives_en_map}
     taxonomy_fr_map = {**ingredients_fr_map, **additives_fr_map}
 
@@ -792,7 +714,6 @@ def handle(
     text_name_map = _build_text_name_map(text_votes)
     logger.info(f"Text-based display names resolved: {len(text_name_map)}")
 
-    # Log quelques exemples
     for sample_id in list(text_name_map.keys())[:10]:
         votes = text_votes.get(sample_id, {})
         logger.info(
@@ -815,7 +736,7 @@ def handle(
     else:
         df_product_ingredients = _empty_product_ingredients_df()
 
-    # 7. sous_ingredients (noms résolus via text_name_map)
+    # 7. sous_ingredients (avec code produit)
     if all_component_rows:
         df_sous_ingredients = _build_sous_ingredients_df(
             all_component_rows, text_name_map, taxonomy_en_map, taxonomy_fr_map
@@ -823,7 +744,7 @@ def handle(
         df_sous_ingredients = (
             df_sous_ingredients
             .drop_duplicates()
-            .sort_values(["ingredient_id", "rang", "sous_ingredient_id"])
+            .sort_values(["code", "ingredient_id", "rang", "sous_ingredient_id"])
             .reset_index(drop=True)
         )
     else:
