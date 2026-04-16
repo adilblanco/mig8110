@@ -119,6 +119,117 @@ def _parse_ingredients_value(value: Any) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Standardisation du nom d'ingrédient
+# ---------------------------------------------------------------------------
+
+# Mots/termes à préserver tels quels (insensibles à la casse)
+_PRESERVE_CASE = {
+    "ph": "pH",
+    "dha": "DHA",
+    "epa": "EPA",
+    "bha": "BHA",
+    "bht": "BHT",
+    "msg": "MSG",
+    "hfcs": "HFCS",
+    "gmo": "GMO",
+    "tbhq": "TBHQ",
+}
+
+# Petits mots qui restent en minuscule sauf en début de nom
+_LOWERCASE_WORDS = {
+    "de", "du", "des", "le", "la", "les", "et", "ou", "au", "aux", "en",
+    "of", "the", "and", "or", "in", "with", "from", "for", "a", "an",
+}
+
+
+def _smart_title_case(text: str) -> str:
+    """
+    Title case intelligent pour les noms d'ingrédients.
+
+    Gère :
+        - Additifs : e150a → E150a (pas E150A)
+        - Acronymes connus : ph → pH, dha → DHA, bht → BHT
+        - Vitamines : vitamin b12 → Vitamin B12
+        - Petits mots FR/EN : de, du, of, the → minuscules sauf en position initiale
+        - Texte normal : whole wheat flour → Whole Wheat Flour
+    """
+    if not text:
+        return text
+
+    words = text.split()
+    result = []
+
+    for i, word in enumerate(words):
+        lower = word.lower()
+
+        # 1. Acronymes et termes à préserver
+        if lower in _PRESERVE_CASE:
+            result.append(_PRESERVE_CASE[lower])
+            continue
+
+        # 2. Codes additifs : e150a → E150a, e412 → E412
+        if re.match(r'^e\d', lower):
+            result.append(lower[0].upper() + lower[1:])
+            continue
+
+        # 3. Vitamines avec suffixe : b12 → B12, d3 → D3, b6 → B6, k2 → K2
+        if re.match(r'^[a-z]\d+$', lower):
+            result.append(word.upper())
+            continue
+
+        # 4. Petits mots (sauf en position initiale)
+        if i > 0 and lower in _LOWERCASE_WORDS:
+            result.append(lower)
+            continue
+
+        # 5. Cas standard : capitalize le premier caractère, préserve le reste
+        result.append(word.capitalize())
+
+    return " ".join(result)
+
+
+def _humanize_name(slug: str) -> str:
+    """
+    Convertit un slug en nom lisible avec _smart_title_case.
+
+    Exemples :
+        whole-wheat-flour  → Whole Wheat Flour
+        e150a              → E150a
+        sodium-chloride    → Sodium Chloride
+        vitamin-b12        → Vitamin B12
+        beurre-de-cacao    → Beurre de Cacao
+    """
+    if not slug:
+        return slug
+    name = slug.replace("-", " ").replace("_", " ")
+    return _smart_title_case(name)
+
+
+def _get_display_name(
+    ingredient_id: str,
+    display_name_map: dict[str, str],
+    fr_display_name_map: dict[str, str] | None = None,
+) -> str:
+    """
+    Retourne le nom lisible d'un ingrédient, par ordre de priorité :
+      1. Nom anglais extrait de la taxonomie OFF (ex: "Whole Wheat Flour")
+      2. Nom français extrait de la taxonomie OFF (ex: "Farine de Blé Complet")
+      3. Fallback : humanisation du slug (ex: "whole-wheat-flour" → "Whole Wheat Flour")
+    """
+    # 1. Nom taxonomique anglais (prioritaire)
+    if ingredient_id in display_name_map:
+        return display_name_map[ingredient_id]
+
+    # 2. Nom taxonomique français (fallback)
+    if fr_display_name_map and ingredient_id in fr_display_name_map:
+        return fr_display_name_map[ingredient_id]
+
+    # 3. Fallback : humaniser le slug extrait de l'id
+    raw = _canonical_name_from_id(ingredient_id)
+    return _humanize_name(raw)
+
+
+# ---------------------------------------------------------------------------
 # Téléchargement taxonomies OFF
 # ---------------------------------------------------------------------------
 
@@ -135,20 +246,27 @@ def _download_taxonomy(url: str) -> str:
 # Parsing OFF générique
 # ---------------------------------------------------------------------------
 
-def _parse_taxonomy_with_properties(text: str) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+def _parse_taxonomy_with_properties(
+    text: str,
+) -> tuple[dict[str, str], dict[str, dict[str, str]], dict[str, str], dict[str, str]]:
     """
     Parse une taxonomie OFF texte.
 
     Retourne :
-    - canonical_map : tag -> canonical_id
-    - properties_map : canonical_id -> dict de propriétés
+    - canonical_map         : tag -> canonical_id
+    - properties_map        : canonical_id -> dict de propriétés
+    - display_name_map      : canonical_id -> nom lisible anglais (ex: "Whole Wheat Flour")
+    - fr_display_name_map   : canonical_id -> nom lisible français (ex: "Farine de Blé Complet")
 
     Exemple :
     canonical_map["fr:colorant"] = "en:colour"
-    properties_map["en:e150a"] = {"additives_classes:en": "en:colour"}
+    display_name_map["en:whole-wheat-flour"] = "Whole Wheat Flour"
+    fr_display_name_map["en:whole-wheat-flour"] = "Farine de Blé Complet"
     """
     canonical_map: dict[str, str] = {}
     properties_map: dict[str, dict[str, str]] = {}
+    display_name_map: dict[str, str] = {}
+    fr_display_name_map: dict[str, str] = {}
 
     current_canonical: str | None = None
 
@@ -206,8 +324,14 @@ def _parse_taxonomy_with_properties(text: str) -> tuple[dict[str, str], dict[str
                     current_canonical = canonical
                     canonical_map[canonical] = canonical
                     _ensure_props(canonical)
+                    # Capturer le nom lisible anglais avec smart title case
+                    display_name_map[canonical] = _smart_title_case(values[0].strip())
 
             if current_canonical:
+                # Capturer le nom français (premier rencontré seulement)
+                if key == "fr" and current_canonical not in fr_display_name_map:
+                    fr_display_name_map[current_canonical] = _smart_title_case(values[0].strip())
+
                 for val in values:
                     tag = _to_tag(key, val)
                     if tag:
@@ -222,12 +346,13 @@ def _parse_taxonomy_with_properties(text: str) -> tuple[dict[str, str], dict[str
         properties_map[current_canonical][key] = rest
 
     logger.info(
-        "Parsed taxonomy: %s canonical ids, %s known tags, %s property entries",
+        "Parsed taxonomy: %s canonical ids, %s known tags, %s EN display names, %s FR display names",
         sum(1 for k, v in canonical_map.items() if k == v),
         len(canonical_map),
-        len(properties_map),
+        len(display_name_map),
+        len(fr_display_name_map),
     )
-    return canonical_map, properties_map
+    return canonical_map, properties_map, display_name_map, fr_display_name_map
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +397,6 @@ def _build_additive_role_map(
                 resolved_roles.append(role_name)
 
         if resolved_roles:
-            # S'il y a plusieurs classes OFF, on garde la première
             role_map[additive_id.lower()] = resolved_roles[0]
 
     logger.info("Built additive role map for %s additive ids", len(role_map))
@@ -310,7 +434,12 @@ def _candidate_tags_from_item(item: dict) -> list[str]:
     return unique
 
 
-def _normalize_ingredient(item: dict, canonical_map: dict[str, str]) -> dict | None:
+def _normalize_ingredient(
+    item: dict,
+    canonical_map: dict[str, str],
+    display_name_map: dict[str, str],
+    fr_display_name_map: dict[str, str],
+) -> dict | None:
     if not isinstance(item, dict):
         return None
 
@@ -320,7 +449,9 @@ def _normalize_ingredient(item: dict, canonical_map: dict[str, str]) -> dict | N
     for candidate in _candidate_tags_from_item(item):
         if candidate in canonical_map:
             ingredient_id = canonical_map[candidate]
-            ingredient_name = _canonical_name_from_id(ingredient_id)
+            ingredient_name = _get_display_name(
+                ingredient_id, display_name_map, fr_display_name_map
+            )
             return {
                 "ingredient_id": ingredient_id,
                 "ingredient_name": ingredient_name,
@@ -331,7 +462,9 @@ def _normalize_ingredient(item: dict, canonical_map: dict[str, str]) -> dict | N
     raw_id = item.get("id")
     if isinstance(raw_id, str) and raw_id.strip():
         ingredient_id = raw_id.strip().lower()
-        ingredient_name = _canonical_name_from_id(ingredient_id)
+        ingredient_name = _get_display_name(
+            ingredient_id, display_name_map, fr_display_name_map
+        )
         return {
             "ingredient_id": ingredient_id,
             "ingredient_name": ingredient_name,
@@ -343,9 +476,12 @@ def _normalize_ingredient(item: dict, canonical_map: dict[str, str]) -> dict | N
         slug = _slugify(raw_text)
         if slug:
             ingredient_id = f"en:{slug}"
+            ingredient_name = _get_display_name(
+                ingredient_id, display_name_map, fr_display_name_map
+            )
             return {
                 "ingredient_id": ingredient_id,
-                "ingredient_name": slug,
+                "ingredient_name": ingredient_name,
                 "raw_text": raw_text,
             }
 
@@ -360,6 +496,8 @@ def _flatten_tree(
     code: Any,
     ingredients: Any,
     ingredients_canonical_map: dict[str, str],
+    ingredients_display_name_map: dict[str, str],
+    ingredients_fr_display_name_map: dict[str, str],
     additive_role_map: dict[str, str],
     all_product_rows: list[dict],
     all_component_rows: list[dict],
@@ -371,7 +509,12 @@ def _flatten_tree(
         return
 
     for order, item in enumerate(parsed, start=1):
-        normalized = _normalize_ingredient(item, ingredients_canonical_map)
+        normalized = _normalize_ingredient(
+            item,
+            ingredients_canonical_map,
+            ingredients_display_name_map,
+            ingredients_fr_display_name_map,
+        )
         if not normalized:
             continue
 
@@ -400,7 +543,7 @@ def _flatten_tree(
             )
 
         alias_name = _normalize_alias_text(raw_text)
-        if alias_name and alias_name != ingredient_name:
+        if alias_name and alias_name != ingredient_name.lower():
             all_alias_rows.append(
                 {
                     "ingredient_id": ingredient_id,
@@ -414,6 +557,8 @@ def _flatten_tree(
                 code=code,
                 ingredients=children,
                 ingredients_canonical_map=ingredients_canonical_map,
+                ingredients_display_name_map=ingredients_display_name_map,
+                ingredients_fr_display_name_map=ingredients_fr_display_name_map,
                 additive_role_map=additive_role_map,
                 all_product_rows=all_product_rows,
                 all_component_rows=all_component_rows,
@@ -430,6 +575,8 @@ def _build_ingredients_table(
     product_rows: list[dict],
     component_rows: list[dict],
     alias_rows: list[dict],
+    display_name_map: dict[str, str],
+    fr_display_name_map: dict[str, str],
 ) -> pd.DataFrame:
     ids = set()
 
@@ -450,7 +597,9 @@ def _build_ingredients_table(
     records = [
         {
             "ingredient_id": ingredient_id,
-            "ingredient_name": _canonical_name_from_id(ingredient_id),
+            "ingredient_name": _get_display_name(
+                ingredient_id, display_name_map, fr_display_name_map
+            ),
         }
         for ingredient_id in sorted(ids)
     ]
@@ -529,10 +678,25 @@ def handle(
     additives_txt = _download_taxonomy(ADDITIVES_TXT_URL)
     additive_classes_txt = _download_taxonomy(ADDITIVE_CLASSES_TXT_URL)
 
-    # 2. Parser taxonomies OFF
-    ingredients_canonical_map, _ = _parse_taxonomy_with_properties(ingredients_txt)
-    _, additives_props = _parse_taxonomy_with_properties(additives_txt)
-    additive_classes_canonical_map, _ = _parse_taxonomy_with_properties(additive_classes_txt)
+    # 2. Parser taxonomies OFF (avec noms lisibles EN + FR)
+    ingredients_canonical_map, _, ingredients_display_map, ingredients_fr_display_map = (
+        _parse_taxonomy_with_properties(ingredients_txt)
+    )
+    _, additives_props, additives_display_map, additives_fr_display_map = (
+        _parse_taxonomy_with_properties(additives_txt)
+    )
+    additive_classes_canonical_map, _, _, _ = (
+        _parse_taxonomy_with_properties(additive_classes_txt)
+    )
+
+    # Fusionner les display names (ingrédients + additifs)
+    merged_display_name_map = {**ingredients_display_map, **additives_display_map}
+    merged_fr_display_name_map = {**ingredients_fr_display_map, **additives_fr_display_map}
+
+    logger.info(
+        f"Display names — EN: {len(merged_display_name_map)}, "
+        f"FR: {len(merged_fr_display_name_map)}"
+    )
 
     # 3. Construire role map OFF-only
     additive_role_map = _build_additive_role_map(
@@ -550,6 +714,8 @@ def handle(
             code=row["code"],
             ingredients=row["ingredients"],
             ingredients_canonical_map=ingredients_canonical_map,
+            ingredients_display_name_map=merged_display_name_map,
+            ingredients_fr_display_name_map=merged_fr_display_name_map,
             additive_role_map=additive_role_map,
             all_product_rows=all_product_rows,
             all_component_rows=all_component_rows,
@@ -606,11 +772,13 @@ def handle(
     else:
         df_alias = _empty_alias_df()
 
-    # 8. ingredients
+    # 8. ingredients (avec noms lisibles)
     df_ingredients = _build_ingredients_table(
         product_rows=all_product_rows,
         component_rows=all_component_rows,
         alias_rows=all_alias_rows,
+        display_name_map=merged_display_name_map,
+        fr_display_name_map=merged_fr_display_name_map,
     )
     if df_ingredients.empty:
         df_ingredients = _empty_ingredients_df()
