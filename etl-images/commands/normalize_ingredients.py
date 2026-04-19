@@ -238,9 +238,20 @@ def _parse_taxonomy_with_properties(
 # ---------------------------------------------------------------------------
 
 def _split_off_values(value: str | None) -> list[str]:
+    """
+    Sépare les valeurs d'une propriété OFF et nettoie les préfixes de langue.
+
+    La taxonomie OFF stocke les propriétés sous la forme :
+        additives_classes:en: en:emulsifier, en:stabiliser
+    Après le split initial (key, rest), rest = "en: en:emulsifier, en:stabiliser"
+    Le préfixe "en: " (code langue + espace) doit être retiré.
+    """
     if not value:
         return []
-    return [part.strip().lower() for part in value.split(",") if part.strip()]
+    # Retirer le préfixe de langue (ex: "en: " au début de la valeur)
+    value = re.sub(r'^[a-z]{2,3}:\s*', '', value.strip())
+    parts = [part.strip().lower() for part in value.split(",") if part.strip()]
+    return parts
 
 
 def _build_additive_role_map(
@@ -261,7 +272,7 @@ def _build_additive_role_map(
         resolved_roles = []
         for class_tag in class_tags:
             canonical_class_id = additive_classes_canonical_map.get(class_tag, class_tag)
-            role_name = _canonical_name_from_id(canonical_class_id)
+            role_name = _id_to_name(canonical_class_id)
             if role_name and role_name not in resolved_roles:
                 resolved_roles.append(role_name)
 
