@@ -1,3 +1,4 @@
+
 """
 normalize_ingredients.py
 ========================
@@ -5,22 +6,23 @@ Ce module normalise la colonne 'ingredients' du fichier parquet transformé
 et produit 4 tables de sortie :
 
     1. ingredients           — Référentiel unique de tous les ingrédients
-                               (ingredient_id [INT], ingredient_name)
+                               (ingredient_id [BIGINT], ingredient_name)
 
     2. product_ingredients   — Jonction produit ↔ ingrédient (niveau 1 seulement)
-                               (code, ingredient_id [INT FK], ingredient_order, role)
+                               (code, ingredient_id [BIGINT FK], ingredient_order, role)
 
     3. sous_ingredients      — Composition des ingrédients composés (niveau 2+)
-                               (ingredient_id [INT FK], sous_ingredient_id [INT FK],
+                               (ingredient_id [BIGINT FK], sous_ingredient_id [BIGINT FK],
                                 sous_ingredient_name, rang)
 
     4. ingredient_alias      — Variantes textuelles d'un même ingrédient
-                               (ingredient_id [INT FK], alias_name)
+                               (ingredient_id [BIGINT FK], alias_name)
 
 Logique des identifiants :
     En interne, le pipeline utilise des tags OFF (ex: "en:sugar") pour
     la résolution canonique. En sortie, chaque tag unique est remplacé
-    par un entier auto-incrémenté (1, 2, 3...) via un mapping global.
+    par un ID stable (hash MD5 64 bits, mod 2^63), identique entre
+    initial load et tous les deltas futurs.
 
 Logique de nommage :
     ingredient_name = slug extrait du tag, tirets remplacés par espaces
@@ -29,6 +31,7 @@ Logique de nommage :
 
 import os
 import json
+import hashlib
 import logging
 import re
 import unicodedata
@@ -187,6 +190,20 @@ def _parse_ingredients_value(value: Any) -> list:
             logger.warning(f"Unable to parse ingredients JSON: {value[:120]}")
             return []
     return []
+
+
+# ===========================================================================
+# ID STABLE PAR HASH
+# ===========================================================================
+
+def _stable_id(tag: str) -> int:
+    """Génère un ID entier positif stable depuis un tag OFF canonique.
+
+    16 hex chars = 64 bits → collision quasi-impossible même pour 80 000 ingrédients.
+    Modulo 2^63 pour rester dans les limites du BIGINT signé de DuckDB.
+    Même tag = même ID garanti entre initial load et tous les deltas futurs.
+    """
+    return int(hashlib.md5(tag.encode()).hexdigest()[:16], 16) % (2 ** 63)
 
 
 # ===========================================================================
@@ -451,7 +468,7 @@ def _normalize_ingredient(
 
 
 # ===========================================================================
-# MAPPING TAG → ID NUMÉRIQUE
+# MAPPING TAG → ID STABLE
 # ===========================================================================
 
 def _build_id_mapping(
@@ -460,46 +477,39 @@ def _build_id_mapping(
     alias_rows: list[dict],
 ) -> dict[str, int]:
     """
-    Construit le mapping global : tag OFF → id numérique.
+    Construit le mapping global : tag OFF → id stable (hash MD5 64 bits).
 
-    Collecte tous les tags uniques présents dans les 3 tables,
-    les trie par ordre alphabétique, et assigne un entier séquentiel
-    commençant à 1.
+    Collecte tous les tags uniques présents dans les 3 tables et assigne
+    à chacun un ID stable par hash MD5 (mod 2^63), cohérent entre
+    initial load et tous les deltas futurs.
 
     Exemple :
-        "en:butter"       → 1
-        "en:coconut-cream" → 2
-        "en:e150a"        → 3
-        "en:sugar"        → 4
-        "en:water"        → 5
+        "en:butter"        → 3521863...
+        "en:coconut-cream" → 7842194...
+        "en:sugar"         → 1290384...
 
     Ce mapping est utilisé pour remplacer les tags textuels par des
     entiers dans toutes les tables de sortie.
     """
-    all_tags = set()
+    all_tags: set[str] = set()
 
-    # Collecter depuis product_ingredients
     for row in product_rows:
         if row.get("tag_id"):
             all_tags.add(row["tag_id"])
 
-    # Collecter depuis sous_ingredients (parent et enfant)
     for row in component_rows:
         if row.get("parent_tag_id"):
             all_tags.add(row["parent_tag_id"])
         if row.get("sous_tag_id"):
             all_tags.add(row["sous_tag_id"])
 
-    # Collecter depuis ingredient_alias
     for row in alias_rows:
         if row.get("tag_id"):
             all_tags.add(row["tag_id"])
 
-    # Tri alphabétique → assignation séquentielle à partir de 1
-    sorted_tags = sorted(all_tags)
-    tag_to_id = {tag: idx for idx, tag in enumerate(sorted_tags, start=1)}
+    tag_to_id = {tag: _stable_id(tag) for tag in all_tags}
 
-    logger.info(f"Built id mapping: {len(tag_to_id)} unique tags → numeric ids (1..{len(tag_to_id)})")
+    logger.info(f"Built id mapping: {len(tag_to_id)} unique tags → stable numeric ids")
 
     return tag_to_id
 
@@ -522,7 +532,7 @@ def _flatten_tree(
     Parcourt récursivement l'arbre d'ingrédients d'un produit.
 
     En interne, les tags OFF (ex: "en:sugar") sont utilisés pour
-    la résolution. Les ids numériques sont assignés après le flatten.
+    la résolution. Les ids stables sont assignés après le flatten.
 
     Dispatch selon le niveau :
     - parent_tag_id is None → niveau 1 → product_ingredients
@@ -590,7 +600,7 @@ def _flatten_tree(
 
 
 # ===========================================================================
-# CONSTRUCTION DES TABLES FINALES (avec ids numériques)
+# CONSTRUCTION DES TABLES FINALES (avec ids stables)
 # ===========================================================================
 
 def _build_ingredients_df(tag_to_id: dict[str, int]) -> pd.DataFrame:
@@ -598,13 +608,13 @@ def _build_ingredients_df(tag_to_id: dict[str, int]) -> pd.DataFrame:
     Construit la table ingredients (référentiel).
 
     Colonnes :
-        ingredient_id   : entier auto-incrémenté (PK)
+        ingredient_id   : ID stable hash MD5 (PK)
         ingredient_name : nom lisible dérivé du tag
 
     Exemple :
-        1 | butter
-        2 | coconut cream
-        3 | e150a
+        3521863... | butter
+        7842194... | coconut cream
+        1290384... | e150a
     """
     records = [
         {
@@ -613,7 +623,9 @@ def _build_ingredients_df(tag_to_id: dict[str, int]) -> pd.DataFrame:
         }
         for tag, numeric_id in sorted(tag_to_id.items(), key=lambda x: x[1])
     ]
-    return pd.DataFrame(records, columns=["ingredient_id", "ingredient_name"])
+    df = pd.DataFrame(records, columns=["ingredient_id", "ingredient_name"])
+    df["ingredient_id"] = df["ingredient_id"].astype(pd.Int64Dtype())
+    return df
 
 
 def _build_product_ingredients_df(
@@ -623,11 +635,11 @@ def _build_product_ingredients_df(
     """
     Construit la table product_ingredients.
 
-    Remplace tag_id par l'id numérique correspondant.
+    Remplace tag_id par l'id stable correspondant.
 
     Colonnes :
         code             : code-barres du produit
-        ingredient_id    : entier (FK → ingredients)
+        ingredient_id    : ID stable (FK → ingredients)
         ingredient_order : position dans la liste (1 = le plus abondant)
         role             : rôle de l'additif (None si pas un additif)
     """
@@ -641,7 +653,10 @@ def _build_product_ingredients_df(
         for row in product_rows
         if row.get("tag_id") in tag_to_id
     ]
-    return pd.DataFrame(records, columns=["code", "ingredient_id", "ingredient_order", "role"])
+    df = pd.DataFrame(records, columns=["code", "ingredient_id", "ingredient_order", "role"])
+    if not df.empty:
+        df["ingredient_id"] = df["ingredient_id"].astype(pd.Int64Dtype())
+    return df
 
 
 def _build_sous_ingredients_df(
@@ -651,11 +666,11 @@ def _build_sous_ingredients_df(
     """
     Construit la table sous_ingredients.
 
-    Remplace parent_tag_id et sous_tag_id par les ids numériques.
+    Remplace parent_tag_id et sous_tag_id par les ids stables.
 
     Colonnes :
-        ingredient_id        : entier (FK → ingredients, le parent)
-        sous_ingredient_id   : entier (FK → ingredients, l'enfant)
+        ingredient_id        : ID stable (FK → ingredients, le parent)
+        sous_ingredient_id   : ID stable (FK → ingredients, l'enfant)
         sous_ingredient_name : nom lisible du sous-ingrédient
         rang                 : position dans la sous-liste du parent
     """
@@ -669,10 +684,14 @@ def _build_sous_ingredients_df(
         for row in component_rows
         if row.get("parent_tag_id") in tag_to_id and row.get("sous_tag_id") in tag_to_id
     ]
-    return pd.DataFrame(
+    df = pd.DataFrame(
         records,
         columns=["ingredient_id", "sous_ingredient_id", "sous_ingredient_name", "rang"],
     )
+    if not df.empty:
+        df["ingredient_id"] = df["ingredient_id"].astype(pd.Int64Dtype())
+        df["sous_ingredient_id"] = df["sous_ingredient_id"].astype(pd.Int64Dtype())
+    return df
 
 
 def _build_alias_df(
@@ -682,10 +701,10 @@ def _build_alias_df(
     """
     Construit la table ingredient_alias.
 
-    Remplace tag_id par l'id numérique correspondant.
+    Remplace tag_id par l'id stable correspondant.
 
     Colonnes :
-        ingredient_id : entier (FK → ingredients)
+        ingredient_id : ID stable (FK → ingredients)
         alias_name    : variante textuelle de l'ingrédient
     """
     records = [
@@ -696,27 +715,44 @@ def _build_alias_df(
         for row in alias_rows
         if row.get("tag_id") in tag_to_id
     ]
-    return pd.DataFrame(records, columns=["ingredient_id", "alias_name"])
+    df = pd.DataFrame(records, columns=["ingredient_id", "alias_name"])
+    if not df.empty:
+        df["ingredient_id"] = df["ingredient_id"].astype(pd.Int64Dtype())
+    return df
 
 
 # ── DataFrames vides (utilisés quand aucune donnée n'est disponible) ──
 
 def _empty_ingredients_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["ingredient_id", "ingredient_name"])
+    return pd.DataFrame({
+        "ingredient_id": pd.array([], dtype=pd.Int64Dtype()),
+        "ingredient_name": pd.array([], dtype="string"),
+    })
 
 
 def _empty_product_ingredients_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["code", "ingredient_id", "ingredient_order", "role"])
+    return pd.DataFrame({
+        "code": pd.array([], dtype="string"),
+        "ingredient_id": pd.array([], dtype=pd.Int64Dtype()),
+        "ingredient_order": pd.array([], dtype=pd.Int32Dtype()),
+        "role": pd.array([], dtype="string"),
+    })
 
 
 def _empty_sous_ingredients_df() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=["ingredient_id", "sous_ingredient_id", "sous_ingredient_name", "rang"]
-    )
+    return pd.DataFrame({
+        "ingredient_id": pd.array([], dtype=pd.Int64Dtype()),
+        "sous_ingredient_id": pd.array([], dtype=pd.Int64Dtype()),
+        "sous_ingredient_name": pd.array([], dtype="string"),
+        "rang": pd.array([], dtype=pd.Int32Dtype()),
+    })
 
 
 def _empty_alias_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["ingredient_id", "alias_name"])
+    return pd.DataFrame({
+        "ingredient_id": pd.array([], dtype=pd.Int64Dtype()),
+        "alias_name": pd.array([], dtype="string"),
+    })
 
 
 # ===========================================================================
@@ -738,8 +774,8 @@ def handle(
     2. Charger et parser les 3 taxonomies OFF
     3. Construire le role map (additif → rôle)
     4. Aplatir l'arbre d'ingrédients de chaque produit (flatten)
-    5. Construire le mapping tag → id numérique
-    6. Construire les 4 DataFrames de sortie avec ids numériques
+    5. Construire le mapping tag → id stable (hash MD5)
+    6. Construire les 4 DataFrames de sortie avec ids stables
     7. Uploader les 4 fichiers parquet sur S3
     """
 
@@ -798,7 +834,7 @@ def handle(
 
     # ── Étape 4 : Aplatir l'arbre d'ingrédients ──
     # En interne, les listes utilisent les tags OFF (ex: "en:sugar").
-    # Les ids numériques seront assignés à l'étape 5.
+    # Les ids stables seront assignés à l'étape 5.
     all_product_rows: list[dict] = []
     all_component_rows: list[dict] = []
     all_alias_rows: list[dict] = []
@@ -819,8 +855,7 @@ def handle(
     logger.info(f"Flattened sous_ingredients rows: {len(all_component_rows)}")
     logger.info(f"Flattened alias rows: {len(all_alias_rows)}")
 
-    # ── Étape 5 : Construire le mapping tag → id numérique ──
-    # Collecte tous les tags uniques, les trie, et assigne 1, 2, 3...
+    # ── Étape 5 : Construire le mapping tag → id stable ──
     tag_to_id = _build_id_mapping(
         product_rows=all_product_rows,
         component_rows=all_component_rows,
