@@ -1,7 +1,7 @@
-
 """
 normalize_ingredients.py
 ========================
+
 Ce module normalise la colonne 'ingredients' du fichier parquet transformé
 et produit 4 tables de sortie :
 
@@ -9,10 +9,11 @@ et produit 4 tables de sortie :
                                (ingredient_id [BIGINT], ingredient_name)
 
     2. product_ingredients   — Jonction produit ↔ ingrédient (niveau 1 seulement)
-                               (code, ingredient_id [BIGINT FK], ingredient_order, role)
+                               (code, ingredient_id [BIGINT FK], ingredient_name,
+                                ingredient_order, role)
 
     3. sous_ingredients      — Composition des ingrédients composés (niveau 2+)
-                               (ingredient_id [BIGINT FK], sous_ingredient_id [BIGINT FK],
+                               (code, ingredient_id [BIGINT FK], sous_ingredient_id [BIGINT FK],
                                 sous_ingredient_name, rang)
 
     4. ingredient_alias      — Variantes textuelles d'un même ingrédient
@@ -45,7 +46,6 @@ from common.s3 import S3FileHandler
 
 logger = logging.getLogger(__name__)
 
-
 # ===========================================================================
 # CONSTANTES — URLs des taxonomies Open Food Facts
 # ===========================================================================
@@ -54,17 +54,14 @@ INGREDIENTS_TXT_URL = (
     "https://raw.githubusercontent.com/openfoodfacts/"
     "openfoodfacts-server/main/taxonomies/food/ingredients.txt"
 )
-
 ADDITIVES_TXT_URL = (
     "https://raw.githubusercontent.com/openfoodfacts/"
     "openfoodfacts-server/main/taxonomies/additives.txt"
 )
-
 ADDITIVE_CLASSES_TXT_URL = (
     "https://raw.githubusercontent.com/openfoodfacts/"
     "openfoodfacts-server/main/taxonomies/additives_classes.txt"
 )
-
 
 # ===========================================================================
 # HELPERS GÉNÉRAUX — Fonctions utilitaires de nettoyage de texte
@@ -240,7 +237,6 @@ def _parse_taxonomy_with_properties(
     """
     canonical_map: dict[str, str] = {}
     properties_map: dict[str, dict[str, str]] = {}
-
     current_canonical: str | None = None
 
     def _flush():
@@ -510,7 +506,6 @@ def _build_id_mapping(
     tag_to_id = {tag: _stable_id(tag) for tag in all_tags}
 
     logger.info(f"Built id mapping: {len(tag_to_id)} unique tags → stable numeric ids")
-
     return tag_to_id
 
 
@@ -535,8 +530,8 @@ def _flatten_tree(
     la résolution. Les ids stables sont assignés après le flatten.
 
     Dispatch selon le niveau :
-    - parent_tag_id is None → niveau 1 → product_ingredients
-    - parent_tag_id is not None → niveau 2+ → sous_ingredients
+    - parent_tag_id is None     → niveau 1   → product_ingredients
+    - parent_tag_id is not None → niveau 2+  → sous_ingredients
     """
     parsed = _parse_ingredients_value(ingredients)
     if not parsed:
@@ -566,6 +561,7 @@ def _flatten_tree(
             # NIVEAU 2+ → sous_ingredients
             all_component_rows.append(
                 {
+                    "code": code,
                     "parent_tag_id": parent_tag_id,
                     "sous_tag_id": tag_id,
                     "rang": order,
@@ -640,6 +636,7 @@ def _build_product_ingredients_df(
     Colonnes :
         code             : code-barres du produit
         ingredient_id    : ID stable (FK → ingredients)
+        ingredient_name  : nom lisible dérivé du tag
         ingredient_order : position dans la liste (1 = le plus abondant)
         role             : rôle de l'additif (None si pas un additif)
     """
@@ -647,13 +644,17 @@ def _build_product_ingredients_df(
         {
             "code": row["code"],
             "ingredient_id": tag_to_id[row["tag_id"]],
+            "ingredient_name": _id_to_name(row["tag_id"]),
             "ingredient_order": row["ingredient_order"],
             "role": row["role"],
         }
         for row in product_rows
         if row.get("tag_id") in tag_to_id
     ]
-    df = pd.DataFrame(records, columns=["code", "ingredient_id", "ingredient_order", "role"])
+    df = pd.DataFrame(
+        records,
+        columns=["code", "ingredient_id", "ingredient_name", "ingredient_order", "role"],
+    )
     if not df.empty:
         df["ingredient_id"] = df["ingredient_id"].astype(pd.Int64Dtype())
     return df
@@ -669,6 +670,7 @@ def _build_sous_ingredients_df(
     Remplace parent_tag_id et sous_tag_id par les ids stables.
 
     Colonnes :
+        code                 : code-barres du produit
         ingredient_id        : ID stable (FK → ingredients, le parent)
         sous_ingredient_id   : ID stable (FK → ingredients, l'enfant)
         sous_ingredient_name : nom lisible du sous-ingrédient
@@ -676,6 +678,7 @@ def _build_sous_ingredients_df(
     """
     records = [
         {
+            "code": row["code"],
             "ingredient_id": tag_to_id[row["parent_tag_id"]],
             "sous_ingredient_id": tag_to_id[row["sous_tag_id"]],
             "sous_ingredient_name": _id_to_name(row["sous_tag_id"]),
@@ -686,7 +689,7 @@ def _build_sous_ingredients_df(
     ]
     df = pd.DataFrame(
         records,
-        columns=["ingredient_id", "sous_ingredient_id", "sous_ingredient_name", "rang"],
+        columns=["code", "ingredient_id", "sous_ingredient_id", "sous_ingredient_name", "rang"],
     )
     if not df.empty:
         df["ingredient_id"] = df["ingredient_id"].astype(pd.Int64Dtype())
@@ -734,6 +737,7 @@ def _empty_product_ingredients_df() -> pd.DataFrame:
     return pd.DataFrame({
         "code": pd.array([], dtype="string"),
         "ingredient_id": pd.array([], dtype=pd.Int64Dtype()),
+        "ingredient_name": pd.array([], dtype="string"),
         "ingredient_order": pd.array([], dtype=pd.Int32Dtype()),
         "role": pd.array([], dtype="string"),
     })
@@ -741,6 +745,7 @@ def _empty_product_ingredients_df() -> pd.DataFrame:
 
 def _empty_sous_ingredients_df() -> pd.DataFrame:
     return pd.DataFrame({
+        "code": pd.array([], dtype="string"),
         "ingredient_id": pd.array([], dtype=pd.Int64Dtype()),
         "sous_ingredient_id": pd.array([], dtype=pd.Int64Dtype()),
         "sous_ingredient_name": pd.array([], dtype="string"),
@@ -778,7 +783,6 @@ def handle(
     6. Construire les 4 DataFrames de sortie avec ids stables
     7. Uploader les 4 fichiers parquet sur S3
     """
-
     # ── Configuration S3 ──
     s3_bucket = os.environ["S3_BUCKET"]
     s3_endpoint = os.environ["S3_ENDPOINT"]
@@ -889,7 +893,7 @@ def handle(
         df_sous_ingredients = (
             df_sous_ingredients
             .drop_duplicates()
-            .sort_values(["ingredient_id", "rang", "sous_ingredient_id"])
+            .sort_values(["code", "ingredient_id", "rang", "sous_ingredient_id"])
             .reset_index(drop=True)
         )
     else:
@@ -915,13 +919,10 @@ def handle(
 
     if not df_ingredients.empty:
         logger.info("df_ingredients head:\n" + df_ingredients.head(10).to_string())
-
     if not df_product_ingredients.empty:
         logger.info("df_product_ingredients head:\n" + df_product_ingredients.head(10).to_string())
-
     if not df_sous_ingredients.empty:
         logger.info("df_sous_ingredients head:\n" + df_sous_ingredients.head(10).to_string())
-
     if not df_alias.empty:
         logger.info("df_alias head:\n" + df_alias.head(10).to_string())
 
