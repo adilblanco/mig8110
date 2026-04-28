@@ -6,7 +6,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
-
 from commands.load_data import handle as load_data
 from commands.load_delta import handle as load_delta
 from commands.extract_data import handle as extract_data
@@ -52,49 +51,28 @@ from arguments import command, url, output_file_key, input_file_key, table_name,
 def main(command, output_file_key, url, input_file_key, invalid_file_key, table_name, schema_name, filename, base_url, country, lang, columns, products_output_key, categories_output_key, ancetre_categories_output_key, categorie_principale_output_key, categorie_principale_input_key, ingredients_output_key, product_ingredients_output_key, sous_ingredients_output_key, ingredient_alias_output_key, key_column, key_column2):
     if command == "extract_data":
         extract_data(output_file_key, url)
-
     elif command == "filter_data":
         filter_data(input_file_key, output_file_key, columns, country, lang)
     elif command == "validate_data":
-        validate_data(
-            input_file_key,
-            output_file_key,
-            invalid_file_key,
-            schema_name,
-            table_name,
-        )
-
+        validate_data(input_file_key, output_file_key, invalid_file_key, schema_name, table_name)
     elif command == "validate_delta":
-        validate_delta(
-            input_file_key,
-            output_file_key,
-            invalid_file_key,
-            schema_name,
-            table_name,
-        )
-
+        validate_delta(input_file_key, output_file_key, invalid_file_key, schema_name, table_name)
     elif command == "transform_data":
         transform_data(input_file_key, output_file_key)
-
     elif command == "load_data":
         load_data(input_file_key, table_name, schema_name)
-
     elif command == "extract_delta":
         extract_delta(filename, output_file_key, base_url, country, columns)
-
     elif command == "filter_delta":
         filter_delta(input_file_key, output_file_key, columns, lang)
     elif command == "load_delta":
         load_delta(input_file_key, table_name, schema_name, key_column, key_column2)
     elif command == "transform_delta":
         transform_delta(input_file_key, output_file_key)
-
     elif command == "fetch_delta_index":
         fetch_delta_index(url)
-
     elif command == "merge_data":
         merge_data(input_file_key, table_name, schema_name)
-
     elif command == "normalize_categories":
         normalize_categories(input_file_key, categories_output_key, ancetre_categories_output_key, categorie_principale_output_key)
     elif command == "normalize_ingredients":
@@ -103,5 +81,5 @@ def main(command, output_file_key, url, input_file_key, invalid_file_key, table_
         finalize_products(input_file_key, categorie_principale_input_key, output_file_key)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

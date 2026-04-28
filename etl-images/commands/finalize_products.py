@@ -5,8 +5,6 @@ from common.s3 import S3FileHandler
 
 logger = logging.getLogger(__name__)
 
-
-
 COLUMNS_TO_DROP = ["categories_tags", "ingredients"]
 
 
@@ -27,8 +25,8 @@ def handle(input_file_key, categorie_principale_input_key, output_file_key):
                                         produit par normalize_categories.
         output_file_key:                Clé S3 de sortie pour la table products finale.
     """
-    s3_bucket = os.environ["S3_BUCKET"]
-    s3_endpoint = os.environ["S3_ENDPOINT"]
+    s3_bucket     = os.environ["S3_BUCKET"]
+    s3_endpoint   = os.environ["S3_ENDPOINT"]
     s3_access_key = os.environ["S3_ACCESS_KEY"]
     s3_secret_key = os.environ["S3_SECRET_KEY"]
 
@@ -37,9 +35,7 @@ def handle(input_file_key, categorie_principale_input_key, output_file_key):
     s3_handler = S3FileHandler(s3_bucket, s3_endpoint, s3_access_key, s3_secret_key)
 
     raw = s3_handler.download_to_memory(input_file_key)
-    df = pd.read_parquet(raw)
-
-    logger.info(f"Columns before finalize: {df.columns.tolist()}")
+    df  = pd.read_parquet(raw)
 
     raw_cp = s3_handler.download_to_memory(categorie_principale_input_key)
     df_cp  = pd.read_parquet(raw_cp)
@@ -56,7 +52,6 @@ def handle(input_file_key, categorie_principale_input_key, output_file_key):
     df = df.drop(columns=cols_present)
 
     logger.info(f"Dropped columns: {cols_present}")
-    logger.info(f"Columns after finalize: {df.columns.tolist()}")
 
     s3_handler.upload_dataframe(df, output_file_key)
     logger.info(f"products uploaded → {output_file_key} ({len(df)} records)")
